@@ -18,7 +18,7 @@
     profile: null,
     profileError: null,
     booting: true,
-    auth: { step: 'email', email: '', busy: false, error: '' },
+    auth: { step: 'signin', email: '', busy: false, error: '' },
     data: { bulletins: [], sops: [], contacts: [], roster: [], profiles: [] },
     photoUrls: {},
     photoUrlsAt: 0,
@@ -365,6 +365,7 @@
           const el = inputs[f.name];
           if (f.type === 'checkbox') out[f.name] = el.checked;
           else if (f.type === 'number') out[f.name] = Number(el.value || 0);
+          else if (f.type === 'password') out[f.name] = el.value;
           else out[f.name] = el.value.trim();
           if (f.required && !out[f.name]) { showErr(`${f.label} is required.`); el.focus(); return; }
         }
@@ -417,56 +418,85 @@
       content));
   }
 
+  const MIN_PASSWORD = 8;
+
   function signInView() {
     const a = state.auth;
-    if (a.step === 'email') {
-      const input = h('input', { type: 'email', id: 'email', class: 'input', autocomplete: 'email', inputmode: 'email', placeholder: 'you@example.com' });
-      input.value = a.email;
-      return authCard(h('form', {
-        onsubmit: (e) => { e.preventDefault(); a.email = input.value.trim().toLowerCase(); if (validEmail(a.email)) sendCode(); else { a.error = 'Enter a valid email address.'; render(); } }
-      },
-      h('p', { class: 'lead' }, "Sign in with your email. We'll send you a one-time code."),
-      h('div', { class: 'field' }, h('label', { for: 'email' }, 'Email'), input),
-      h('button', { class: 'btn primary block', type: 'submit', disabled: a.busy }, a.busy ? 'Sending…' : 'Send code'),
-      a.error && h('div', { class: 'error-text' }, a.error)));
-    }
-    const code = h('input', { type: 'text', id: 'code', class: 'input code-input', autocomplete: 'one-time-code', inputmode: 'numeric', maxlength: '10', placeholder: '••••••' });
-    return authCard(h('form', {
-      onsubmit: (e) => { e.preventDefault(); const t = code.value.replace(/\D/g, ''); if (t.length >= 6) verifyCode(t); else { a.error = 'Enter the code from the email.'; render(); } }
+    const signup = a.step === 'signup';
+    const email = h('input', { type: 'email', id: 'email', class: 'input', autocomplete: 'email', inputmode: 'email', placeholder: 'you@example.com' });
+    email.value = a.email;
+    const pw = h('input', { type: 'password', id: 'password', class: 'input', autocomplete: signup ? 'new-password' : 'current-password' });
+    const name = signup ? h('input', { type: 'text', id: 'fullname', class: 'input', autocomplete: 'name', placeholder: 'First and last name' }) : null;
+    const pw2 = signup ? h('input', { type: 'password', id: 'password2', class: 'input', autocomplete: 'new-password' }) : null;
+    const errEl = h('div', { class: 'error-text' + (a.error ? '' : ' hidden') }, a.error);
+    const submitBtn = h('button', { class: 'btn primary block', type: 'submit' }, signup ? 'Create account' : 'Sign in');
+    // Update the form in place so typed values are never wiped.
+    a.showError = (m) => { a.error = m || ''; errEl.textContent = a.error; errEl.classList.toggle('hidden', !a.error); };
+    a.setBusy = (b) => { a.busy = b; submitBtn.disabled = b; submitBtn.textContent = b ? 'Please wait…' : (signup ? 'Create account' : 'Sign in'); };
+    const fail = (m) => a.showError(m);
+
+    const form = h('form', {
+      onsubmit: (e) => {
+        e.preventDefault();
+        a.email = email.value.trim().toLowerCase();
+        if (!validEmail(a.email)) return fail('Enter a valid email address.');
+        if (signup) {
+          if (!name.value.trim()) return fail('Enter your name.');
+          if (pw.value.length < MIN_PASSWORD) return fail(`Password must be at least ${MIN_PASSWORD} characters.`);
+          if (pw.value !== pw2.value) return fail("Passwords don't match.");
+          doSignUp(a.email, pw.value, name.value.trim());
+        } else {
+          if (!pw.value) return fail('Enter your password.');
+          doSignIn(a.email, pw.value);
+        }
+      }
     },
-    h('p', { class: 'lead' }, 'We sent a code to ', h('strong', {}, a.email), '. Enter it below.'),
-    h('div', { class: 'field' }, h('label', { for: 'code' }, 'Code'), code),
-    h('button', { class: 'btn primary block', type: 'submit', disabled: a.busy }, a.busy ? 'Checking…' : 'Sign in'),
-    a.error && h('div', { class: 'error-text' }, a.error),
+    h('p', { class: 'lead' }, signup ? 'Create your account. A team admin will approve it before you can see team information.' : 'Sign in to continue.'),
+    signup ? h('div', { class: 'field' }, h('label', { for: 'fullname' }, 'Your name'), name) : null,
+    h('div', { class: 'field' }, h('label', { for: 'email' }, 'Email'), email),
+    h('div', { class: 'field' }, h('label', { for: 'password' }, 'Password'), pw,
+      signup ? h('div', { class: 'hint' }, `At least ${MIN_PASSWORD} characters.`) : null),
+    signup ? h('div', { class: 'field' }, h('label', { for: 'password2' }, 'Confirm password'), pw2) : null,
+    submitBtn,
+    errEl,
     h('div', { class: 'actions' },
-      h('button', { type: 'button', class: 'btn small', onclick: () => { a.step = 'email'; a.error = ''; render(); } }, 'Different email'),
-      h('button', { type: 'button', class: 'btn small', disabled: a.busy, onclick: sendCode }, 'Resend code')),
-    h('p', { class: 'muted small' }, "Don't see it? Check your spam folder. Codes expire after about an hour.")));
+      h('button', { type: 'button', class: 'btn small', onclick: () => { a.step = signup ? 'signin' : 'signup'; a.error = ''; a.email = email.value.trim(); render(); } },
+        signup ? 'I already have an account' : 'Create an account')),
+    signup ? null : h('p', { class: 'muted small' }, 'Forgot your password? Contact your team leader.'));
+    return authCard(form);
   }
 
-  async function sendCode() {
+  async function doSignIn(email, password) {
     const a = state.auth;
-    a.busy = true; a.error = ''; render();
-    const { error } = await sb.auth.signInWithOtp({
-      email: a.email,
-      options: { shouldCreateUser: true, emailRedirectTo: location.origin + '/' }
-    });
-    a.busy = false;
-    if (error) a.error = friendlyError(error);
-    else { a.step = 'code'; toast('Code sent — check your email'); }
-    render();
-    const c = document.getElementById('code');
-    if (c) c.focus();
-  }
-
-  async function verifyCode(token) {
-    const a = state.auth;
-    a.busy = true; a.error = ''; render();
-    const { error } = await sb.auth.verifyOtp({ email: a.email, token, type: 'email' });
-    a.busy = false;
-    if (error) { a.error = friendlyError(error); render(); return; }
-    state.auth = { step: 'email', email: '', busy: false, error: '' };
+    a.showError(''); a.setBusy(true);
+    const { error } = await sb.auth.signInWithPassword({ email, password });
+    a.setBusy(false);
+    if (error) {
+      a.showError(/invalid login credentials/i.test(error.message) ? 'Wrong email or password.' : friendlyError(error));
+      return;
+    }
+    state.auth = { step: 'signin', email: '', busy: false, error: '' };
     // onAuthStateChange picks up the new session.
+  }
+
+  async function doSignUp(email, password, fullName) {
+    const a = state.auth;
+    a.showError(''); a.setBusy(true);
+    const { data, error } = await sb.auth.signUp({ email, password, options: { data: { full_name: fullName } } });
+    a.setBusy(false);
+    if (error) {
+      a.showError(/already registered|already exists/i.test(error.message)
+        ? 'An account with that email already exists. Sign in instead.'
+        : friendlyError(error));
+      return;
+    }
+    if (!data.session) {
+      a.step = 'signin';
+      a.error = 'Account created, but email confirmation is still turned on in Supabase. Ask your admin to turn it off, then sign in.';
+      render();
+      return;
+    }
+    state.auth = { step: 'signin', email: '', busy: false, error: '' };
   }
 
   function nameView() {
@@ -968,10 +998,28 @@
 
     content.push(h('div', { class: 'section-title' }, 'App'));
     content.push(h('div', { class: 'list' },
+      h('button', { class: 'list-item', onclick: changeMyPassword }, h('div', { class: 'grow title' }, 'Change password')),
       h('button', { class: 'list-item', onclick: () => refreshAll(true) }, h('div', { class: 'grow title' }, 'Refresh data')),
       h('button', { class: 'list-item', onclick: () => { if (confirm('Sign out of Koinos Security on this device?')) signOut(); } }, h('div', { class: 'grow title' }, 'Sign out'))));
     content.push(h('p', { class: 'muted small center' }, `Koinos Security v${cfg.appVersion}`));
     return { title: 'More', content };
+  }
+
+  function changeMyPassword() {
+    openForm({
+      title: 'Change password',
+      fields: [
+        { name: 'pw', label: 'New password', type: 'password', required: true, autocomplete: 'new-password', hint: `At least ${MIN_PASSWORD} characters.` },
+        { name: 'pw2', label: 'Confirm new password', type: 'password', required: true, autocomplete: 'new-password' }
+      ],
+      onSubmit: async (v) => {
+        if (v.pw.length < MIN_PASSWORD) throw new Error(`Password must be at least ${MIN_PASSWORD} characters.`);
+        if (v.pw !== v.pw2) throw new Error("Passwords don't match.");
+        const { error } = await sb.auth.updateUser({ password: v.pw });
+        if (error) throw error;
+        toast('Password changed');
+      }
+    });
   }
 
   function editMyName() {

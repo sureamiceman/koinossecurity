@@ -30,22 +30,22 @@ All permissions are enforced by the database (row-level security), not just hidd
 ## One-time setup
 
 1. **Database.** In Supabase, open *SQL Editor → New query*, paste the whole of `supabase/schema.sql`, and click *Run*.
-2. **Sign-in email.** In Supabase, go to *Authentication → Email Templates → Magic Link* and add the code to the email body so people can type it into the installed app:
-   ```html
-   <h2>Your Koinos Security sign-in code</h2>
-   <p>Enter this code in the app: <strong>{{ .Token }}</strong></p>
-   ```
-3. **Site URL.** In Supabase, go to *Authentication → URL Configuration* and set *Site URL* to your Netlify address (e.g. `https://your-site.netlify.app`). Add it under *Redirect URLs* too.
+2. **Sign-in settings.** In Supabase, go to *Authentication → Sign In / Providers → Email*. Keep **Email** enabled, **turn off "Confirm email"**, and save. (There is no email sender set up, so the app uses email + password with no confirmation emails. New accounts still can't see anything until an admin approves them.)
+3. **Site URL.** In *Authentication → URL Configuration*, set *Site URL* to `https://koinossecurity.netlify.app`.
 4. **Netlify.** Connect this repo. No build command is needed; `netlify.toml` publishes the `public` folder.
-5. **Make yourself superuser.** Open the site, sign in with your email, enter your name, then in Supabase's SQL editor run:
+5. **Make yourself superuser.** Open the site, tap *Create an account*, then in Supabase's SQL editor run:
    ```sql
    update public.profiles set role = 'superuser' where email = 'your@email.com';
    ```
-   Refresh the app. Repeat for the other superusers after they sign in.
-6. **Invite the team.** Share the site link. Each person signs in, then an admin approves them under *More → Manage users*.
+   Refresh the app. Repeat for the other superusers after they create accounts.
+6. **Invite the team.** Share the site link. Each person creates an account, then an admin approves them under *More → Manage users*.
+
+## Passwords
+
+- Anyone can change their own password under *More → Change password*.
+- There is no "forgot password" email, because the project has no email sender. If you later set up custom SMTP (for example Gmail) under *Authentication → Emails → SMTP Settings*, password-reset emails can be added.
 
 ## Notes
 
 - The Supabase anon key in `public/config.js` is meant to be public. **Never** put the `service_role` key in this repo.
-- Supabase's built-in email sender is rate-limited (a few emails per hour). For a whole team signing in, set up custom SMTP under *Project Settings → Authentication → SMTP* (e.g. Resend, SendGrid, or Gmail SMTP).
 - Photos are resized on the phone before upload and stored in a private bucket; the app shows them through short-lived signed links.
