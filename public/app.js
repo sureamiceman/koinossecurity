@@ -1319,6 +1319,13 @@
         series ? null : h('button', { class: 'btn small', onclick: () => duplicateEvent(e) }, 'Duplicate')) : null);
   }
 
+  // Small round photo (or initials) that opens the person's team card.
+  function avatar(r) {
+    const url = r.photo_path && state.photoUrls[r.photo_path];
+    return h('button', { type: 'button', class: 'avatar', 'aria-label': `View ${r.name}`, title: r.name, onclick: () => openPerson(r) },
+      url ? h('img', { src: url, alt: '', loading: 'lazy' }) : initials(r.name));
+  }
+
   function shiftRow(s, e, me, upcoming) {
     const mine = me && s.roster_id === me.id;
     const st = shiftStart(s, e), en = shiftEnd(s, e);
@@ -1347,7 +1354,8 @@
           s.requires_ccw ? h('span', { class: 'badge ccw inline' }, 'CCW') : null,
           customTime ? h('span', { class: 'muted small' }, ' · ' + timeRange(st, en)) : null),
         h('div', { class: 'shift-person' },
-          s.roster_id ? h('span', {}, rosterName(s.roster_id) + (mine ? ' (you)' : '')) : h('span', { class: 'badge caution' }, 'Open'),
+          assigned ? avatar(assigned) : h('span', { class: 'avatar open', 'aria-hidden': 'true' }, '?'),
+          s.roster_id ? h('span', { class: 'person-name' }, rosterName(s.roster_id) + (mine ? ' (you)' : '')) : h('span', { class: 'badge caution' }, 'Open'),
           notCcw ? h('span', { class: 'badge urgent' }, 'Not CCW') : null,
           s.cover_requested ? h('span', { class: 'badge urgent' }, 'Needs cover') : null),
         s.note ? h('div', { class: 'muted small' }, s.note) : null,
