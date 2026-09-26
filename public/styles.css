@@ -99,12 +99,12 @@ main { flex: 1; padding: 14px 14px calc(90px + var(--safe-bottom)); max-width: 7
 .tabbar {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 10;
   background: var(--surface); border-top: 1px solid var(--border);
-  display: grid; grid-template-columns: repeat(5, 1fr);
+  display: grid; grid-template-columns: repeat(6, 1fr);
   padding-bottom: var(--safe-bottom);
 }
 .tabbar a {
   display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 2px 9px;
-  text-decoration: none; color: var(--muted); font-size: .72rem; font-weight: 600; position: relative;
+  text-decoration: none; color: var(--muted); font-size: .66rem; font-weight: 600; position: relative;
 }
 .tabbar a svg { width: 24px; height: 24px; }
 .tabbar a.active { color: var(--accent); }
@@ -273,3 +273,48 @@ input:focus, select:focus, textarea:focus, .btn:focus-visible, .chip:focus-visib
 .spinner { width: 22px; height: 22px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; margin: 30px auto; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .center { text-align: center; margin-top: 18px; }
+
+/* ---------- CCW / roster extras ---------- */
+:root { --ccw: #4b3fa8; --ccw-bg: #ece9fb; }
+@media (prefers-color-scheme: dark) { :root { --ccw: #b3a8ff; --ccw-bg: #2a2552; } }
+.badge.ccw { background: var(--ccw-bg); color: var(--ccw); }
+.badges { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+.person .badges .badge { margin-top: 0; }
+.block-btn { display: block; width: 100%; text-align: left; border: 0; cursor: pointer; font: inherit; }
+.tiny { font-size: .74rem; }
+.center-text { text-align: center; font-weight: 700; }
+
+/* ---------- Schedule ---------- */
+.sched-tools { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.small-select { width: auto; flex: 1; min-width: 130px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.seg button { border: 0; background: var(--surface); padding: 8px 12px; font-weight: 600; font-size: .85rem; cursor: pointer; }
+.seg button.on { background: var(--accent); color: #fff; }
+.event-card h3 { font-size: 1.05rem; }
+.event-card .badge { margin-top: 6px; }
+.event-card.inactive { opacity: .75; }
+.date-pill { flex: none; width: 52px; text-align: center; border-radius: 10px; background: var(--navy); color: #fff; padding: 6px 0; }
+.date-pill .dp-dow { font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; color: var(--gold); font-weight: 700; }
+.date-pill .dp-day { font-size: 1.35rem; font-weight: 800; line-height: 1.1; }
+.shift-list { margin-top: 12px; border-top: 1px solid var(--border); }
+.shift { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.shift:last-child { border-bottom: 0; }
+.shift.mine { background: linear-gradient(90deg, var(--info-bg), transparent 70%); margin: 0 -14px; padding: 10px 14px; }
+.shift-post { font-weight: 700; }
+.shift-person { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.shift-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.shift-empty { padding: 10px 0; }
+.month-head { display: flex; align-items: center; margin-bottom: 6px; }
+.month-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; }
+.month-grid .dow { text-align: center; font-size: .72rem; color: var(--muted); font-weight: 700; padding-bottom: 4px; }
+.month-grid .day { aspect-ratio: 1 / 1; border: 0; background: none; border-radius: 10px; cursor: pointer; font-weight: 600; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 0; }
+.month-grid .day.has { background: var(--bg); }
+.month-grid .day.today { outline: 2px solid var(--gold); }
+.month-grid .day.sel { background: var(--accent); color: #fff; }
+.dots { display: flex; gap: 3px; height: 6px; }
+.dot-ev { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.dot-ev.mine { background: var(--gold); }
+.dot-ev.help { background: var(--urgent); }
+.legend { display: flex; gap: 4px; align-items: center; margin: 8px 4px 0; flex-wrap: wrap; }
+.small-input { font-size: .8rem; padding: 8px 10px; margin-top: 10px; width: 100%; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.feed .actions { margin-top: 10px; }

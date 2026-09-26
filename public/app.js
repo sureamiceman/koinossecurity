@@ -13,13 +13,15 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
+  const emptyData = () => ({ bulletins: [], sops: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [] });
   const state = {
     session: null,
     profile: null,
     profileError: null,
     booting: true,
     auth: { step: 'signin', email: '', busy: false, error: '' },
-    data: { bulletins: [], sops: [], contacts: [], roster: [], profiles: [] },
+    data: emptyData(),
+    sched: { view: 'list', filter: 'upcoming', person: '', day: null, month: new Date() },
     photoUrls: {},
     photoUrlsAt: 0,
     showArchived: false,
@@ -68,7 +70,8 @@
     x: ['M18 6L6 18', 'M6 6l12 12'],
     msg: ['M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'],
     mail: ['M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z', 'M22 6l-10 7L2 6'],
-    shield: ['M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z']
+    shield: ['M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'],
+    calendar: ['M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z', 'M16 2v4', 'M8 2v4', 'M3 10h18']
   };
   function icon(name) {
     const NS = 'http://www.w3.org/2000/svg';
@@ -152,12 +155,16 @@
   // ------------------------------------------------------------------
   // Data
   // ------------------------------------------------------------------
+  const since = () => new Date(Date.now() - 90 * 864e5).toISOString();
   const QUERIES = {
-    bulletins: (q) => q.order('created_at', { ascending: false }),
-    sops: (q) => q.order('category').order('sort_order').order('title'),
-    contacts: (q) => q.order('category').order('sort_order').order('name'),
-    roster: (q) => q.order('sort_order').order('name'),
-    profiles: (q) => q.order('full_name')
+    bulletins: (t) => t.select('*').order('created_at', { ascending: false }),
+    sops: (t) => t.select('*').order('category').order('sort_order').order('title'),
+    contacts: (t) => t.select('*').order('category').order('sort_order').order('name'),
+    roster: (t) => t.select('*').order('sort_order').order('name'),
+    profiles: (t) => t.select('*').order('full_name'),
+    events: (t) => t.select('*').gte('ends_at', since()).order('starts_at'),
+    shifts: (t) => t.select('*, events!inner(ends_at)').gte('events.ends_at', since()).order('sort_order'),
+    calendar_feeds: (t) => t.select('*').order('created_at')
   };
 
   function loadCachedData() {
@@ -168,8 +175,9 @@
   }
 
   async function refreshTable(t) {
-    const { data, error } = await QUERIES[t](sb.from(t).select('*'));
+    const { data, error } = await QUERIES[t](sb.from(t));
     if (error) return error;
+    if (t === 'shifts') for (const r of data) delete r.events;
     state.data[t] = data;
     cacheSet('data:' + t, data);
     return null;
@@ -195,7 +203,7 @@
 
   function subscribe() {
     if (state.channel) return;
-    state.channel = sb.channel('bulletins-live')
+    state.channel = sb.channel('koinos-live')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'bulletins' }, async (payload) => {
         await refreshTable('bulletins');
         await resolvePhotos();
@@ -205,6 +213,20 @@
           toast((b.priority === 'urgent' ? 'URGENT: ' : 'New: ') + (b.title || 'bulletin posted'), 5000);
           if (navigator.vibrate && b.priority === 'urgent') navigator.vibrate([200, 100, 200]);
         }
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shifts' }, async (payload) => {
+        await refreshTable('shifts');
+        render();
+        const n = payload.new || {};
+        const me = myRoster();
+        if (n.cover_requested && /asked for cover$/.test(n.last_change || '') && (!me || n.roster_id !== me.id)) {
+          const e = eventOf(n);
+          toast(`Cover needed: ${n.post || 'a post'}${e ? ' – ' + e.title : ''}`, 5000);
+        }
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, async () => {
+        await Promise.all([refreshTable('events'), refreshTable('shifts')]);
+        render();
       })
       .subscribe();
   }
@@ -269,12 +291,12 @@
   function openDialog({ title, body, buttons }) {
     const dlg = h('dialog', {});
     const close = () => dlg.close();
-    dlg.append(
+    append(dlg, [
       h('div', { class: 'dlg-head' }, h('h2', {}, title),
         h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: close }, icon('x'))),
       h('div', { class: 'dlg-body' }, body),
-      buttons && buttons.length ? h('div', { class: 'dlg-foot' }, buttons(close)) : null
-    );
+      buttons ? h('div', { class: 'dlg-foot' }, buttons(close)) : null
+    ]);
     dlg.addEventListener('close', () => dlg.remove());
     document.body.append(dlg);
     dlg.showModal();
@@ -577,7 +599,7 @@
     state.session = null;
     state.profile = null;
     state.profileError = null;
-    state.data = { bulletins: [], sops: [], contacts: [], roster: [], profiles: [] };
+    state.data = emptyData();
     state.photoUrls = {};
     history.replaceState(null, '', '/');
     render();
@@ -588,6 +610,7 @@
   // ------------------------------------------------------------------
   const TABS = [
     ['alerts', 'Alerts', 'bell'],
+    ['schedule', 'Schedule', 'calendar'],
     ['sops', 'SOPs', 'book'],
     ['contacts', 'Contacts', 'phone'],
     ['team', 'Team', 'users'],
@@ -606,7 +629,7 @@
   function mainView() {
     let [tab, id] = route();
     if (tab === 'users' && !isAdmin()) tab = 'more';
-    const views = { alerts: alertsView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView };
+    const views = { alerts: alertsView, schedule: scheduleView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView };
     const v = (views[tab] || alertsView)(id);
     const activeTab = tab === 'users' ? 'more' : (views[tab] ? tab : 'alerts');
 
@@ -625,7 +648,7 @@
       navigator.onLine ? null : h('div', { class: 'offline-bar' }, 'Offline — showing saved information'),
       h('main', {}, v.content),
       h('nav', { class: 'tabbar', 'aria-label': 'Main' }, TABS.map(([key, label, ic]) => {
-        const count = key === 'alerts' ? alertCount : key === 'more' ? moreCount : 0;
+        const count = key === 'alerts' ? alertCount : key === 'more' ? moreCount : key === 'schedule' ? coverCount() : 0;
         return h('a', { href: '#/' + key, class: activeTab === key ? 'active' : null, 'aria-current': activeTab === key ? 'page' : null },
           icon(ic), label, count ? h('span', { class: 'dot' }, count > 9 ? '9+' : count) : null);
       })));
@@ -875,16 +898,46 @@
   }
 
   // ------------------------------------------------------------------
-  // Team roster
+  // Team roster (with CCW qualification tracking)
   // ------------------------------------------------------------------
+  const CCW_WARN_DAYS = 30;
+  function dateOnly(s) { if (!s) return null; const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); }
+  function daysUntil(s) {
+    const d = dateOnly(s);
+    if (!d) return null;
+    const t = new Date(); t.setHours(0, 0, 0, 0);
+    return Math.round((d - t) / 86400000);
+  }
+  const fmtDay = (s) => dateOnly(s).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+
+  function ccwStatus(p) {
+    if (!p.ccw_qualified) return null;
+    const d = daysUntil(p.ccw_expires_on);
+    if (d == null) return { cls: 'ccw', label: 'CCW', detail: 'No expiry date on file', problem: true };
+    if (d < 0) return { cls: 'urgent', label: 'CCW expired', detail: `Expired ${fmtDay(p.ccw_expires_on)}`, problem: true };
+    if (d <= CCW_WARN_DAYS) return { cls: 'caution', label: d === 0 ? 'CCW expires today' : `CCW expires in ${d}d`, detail: `Expires ${fmtDay(p.ccw_expires_on)}`, problem: true };
+    return { cls: 'ccw', label: 'CCW', detail: `Qualified through ${fmtDay(p.ccw_expires_on)}` };
+  }
+
   function teamView() {
     const all = state.data.roster.filter((p) => p.active || isAdmin());
     const medical = all.filter((p) => p.is_medical);
-    const showing = state.teamFilter === 'medical' ? medical : all;
+    const ccw = all.filter((p) => p.ccw_qualified)
+      .sort((a, b) => (a.ccw_expires_on || '0000') < (b.ccw_expires_on || '0000') ? -1 : 1);
+    const showing = state.teamFilter === 'medical' ? medical : state.teamFilter === 'ccw' ? ccw : all;
+    const chip = (key, label) => h('button', { class: 'chip' + (state.teamFilter === key ? ' on' : ''), onclick: () => { state.teamFilter = key; render(); } }, label);
     const content = [h('div', { class: 'chips' },
-      h('button', { class: 'chip' + (state.teamFilter === 'all' ? ' on' : ''), onclick: () => { state.teamFilter = 'all'; render(); } }, `Everyone (${all.length})`),
-      h('button', { class: 'chip' + (state.teamFilter === 'medical' ? ' on' : ''), onclick: () => { state.teamFilter = 'medical'; render(); } }, `Medical (${medical.length})`))];
-    if (!showing.length) content.push(empty(state.teamFilter === 'medical' ? 'No medical points of contact listed' : 'No team members listed yet', 'users'));
+      chip('all', `Everyone (${all.length})`), chip('medical', `Medical (${medical.length})`), chip('ccw', `CCW (${ccw.length})`))];
+
+    const problems = ccw.filter((p) => p.active && ccwStatus(p).problem);
+    if (isAdmin() && problems.length) {
+      content.push(h('button', { class: 'notice block-btn', onclick: () => { state.teamFilter = 'ccw'; render(); } },
+        `${problems.length} CCW qualification${problems.length > 1 ? 's' : ''} expired, expiring within ${CCW_WARN_DAYS} days, or missing a date: `,
+        problems.map((p) => p.name).join(', ')));
+    }
+    if (!showing.length) content.push(empty(
+      state.teamFilter === 'medical' ? 'No medical points of contact listed'
+        : state.teamFilter === 'ccw' ? 'No CCW-qualified team members listed' : 'No team members listed yet', 'users'));
     else content.push(h('div', { class: 'roster-grid' }, showing.map(personCard)));
     return { title: 'Team', action: isAdmin() ? topAction('+ New', () => editPerson()) : null, content };
   }
@@ -895,17 +948,21 @@
   }
 
   function personCard(p) {
+    const c = ccwStatus(p);
     return h('button', { class: 'person' + (p.active ? '' : ' inactive'), onclick: () => openPerson(p) },
       personPhoto(p),
       h('div', { class: 'info' },
         h('div', { class: 'name' }, p.name),
         p.position ? h('div', { class: 'pos' }, p.position) : null,
-        p.is_medical ? h('span', { class: 'badge medical' }, 'Medical') : null,
-        !p.active ? h('span', { class: 'badge muted-badge' }, 'Inactive') : null));
+        h('div', { class: 'badges' },
+          p.is_medical ? h('span', { class: 'badge medical' }, 'Medical') : null,
+          c ? h('span', { class: 'badge ' + c.cls }, c.label) : null,
+          !p.active ? h('span', { class: 'badge muted-badge' }, 'Inactive') : null)));
   }
 
   function openPerson(p) {
     const url = p.photo_path && state.photoUrls[p.photo_path];
+    const c = ccwStatus(p);
     openDialog({
       title: p.name,
       body: [
@@ -914,6 +971,9 @@
         p.is_medical ? h('div', { class: 'card' },
           h('span', { class: 'badge medical' }, 'Medical point of contact'),
           p.medical_notes ? h('div', { class: 'body-text' }, p.medical_notes) : null) : null,
+        c ? h('div', { class: 'card' },
+          h('span', { class: 'badge ' + c.cls }, c.label === 'CCW' ? 'CCW qualified' : c.label),
+          h('div', { class: 'body-text' }, c.detail)) : null,
         p.phone ? h('div', { class: 'meta' }, p.phone) : null,
         p.email ? h('div', { class: 'meta' }, p.email) : null,
         h('div', { class: 'actions' },
@@ -928,24 +988,42 @@
   function editPerson(p) {
     const isNew = !p;
     p = p || {};
+    const accounts = state.data.profiles.filter((a) => a.role !== 'pending');
     openForm({
       title: isNew ? 'Add team member' : 'Edit team member',
-      values: p,
+      values: { ...p, profile_id: p.profile_id || '', ccw_expires_on: p.ccw_expires_on || '' },
       fields: [
         { name: 'name', label: 'Name', required: true },
-        { name: 'position', label: 'Position / post', placeholder: 'e.g. Team lead, Parking lot, Sanctuary' },
+        { name: 'position', label: 'Position / usual post', placeholder: 'e.g. Team lead, Parking lot, Sanctuary' },
         { name: 'phone', label: 'Phone', type: 'tel', inputmode: 'tel' },
         { name: 'email', label: 'Email', type: 'email', inputmode: 'email' },
+        { name: 'profile_id', label: 'App account', type: 'select',
+          options: [['', 'Not linked'], ...accounts.map((a) => [a.id, `${a.full_name || '(no name)'} — ${a.email}`])],
+          hint: 'Link the person\'s sign-in so they can see "My assignments" and volunteer or swap. Left blank, it links automatically when the email matches.' },
         { name: 'photo', label: 'Photo', type: 'photo', currentUrl: p.photo_path ? state.photoUrls[p.photo_path] : null },
         { name: 'is_medical', label: 'Medical point of contact', type: 'checkbox' },
         { name: 'medical_notes', label: 'Medical qualifications', placeholder: 'e.g. RN, EMT, CPR/AED certified' },
+        { name: 'ccw_qualified', label: 'CCW qualified', type: 'checkbox' },
+        { name: 'ccw_expires_on', label: 'CCW qualification expires', type: 'date', hint: `Admins are warned ${CCW_WARN_DAYS} days before it expires.` },
         { name: 'sort_order', label: 'Sort order', type: 'number', default: 0, inputmode: 'numeric' },
         { name: 'active', label: 'Active on the team', type: 'checkbox', default: true }
       ],
       onSubmit: async (v, photo) => {
+        if (!v.profile_id && v.email) {
+          const match = accounts.find((a) => a.email && a.email.toLowerCase() === v.email.toLowerCase());
+          const taken = match && state.data.roster.some((r) => r.profile_id === match.id && r.id !== p.id);
+          if (match && !taken) v.profile_id = match.id;
+        }
+        if (v.ccw_qualified && !v.ccw_expires_on && !confirm('CCW is checked but there is no expiry date. Save anyway?')) throw new Error('Add the CCW expiry date, then save.');
         const ph = await applyPhoto('roster', p.photo_path, photo);
-        const row = { ...v, photo_path: ph.path };
-        try { await saveRow('roster', p.id, row); } catch (e) { if (ph.path && ph.path !== p.photo_path) removePhoto(ph.path); throw e; }
+        const row = { ...v, profile_id: v.profile_id || null, ccw_expires_on: v.ccw_expires_on || null, photo_path: ph.path };
+        try {
+          await saveRow('roster', p.id, row);
+        } catch (e) {
+          if (ph.path && ph.path !== p.photo_path) removePhoto(ph.path);
+          if (/roster_profile_id_key|duplicate key/i.test(e.message || '')) throw new Error('That app account is already linked to another roster entry.');
+          throw e;
+        }
         removePhoto(ph.oldToRemove);
         await afterSave('roster', isNew ? 'Team member added' : 'Saved');
       },
@@ -954,7 +1032,391 @@
         removePhoto(p.photo_path);
         await afterSave('roster', 'Removed from roster');
       },
-      deleteConfirm: 'Remove this person from the roster permanently? (Unchecking "Active" hides them instead.)'
+      deleteConfirm: 'Remove this person from the roster permanently? Their scheduled posts become open. (Unchecking "Active" hides them instead.)'
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Schedule
+  // ------------------------------------------------------------------
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const ymd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const hm = (d) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const fmtTime = (d) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  function timeRange(a, b) {
+    const s = fmtTime(a), e = fmtTime(b);
+    const ap = (x) => x.slice(-2);
+    return /[AP]M$/.test(s) && ap(s) === ap(e) ? `${s.slice(0, -3)}–${e}` : `${s}–${e}`;
+  }
+  // Combine a date ("2026-09-27") and time ("08:15") in local time; end before start = next day.
+  function localIso(date, time) { return new Date(`${date}T${time}`).toISOString(); }
+  function endIso(date, start, end) {
+    const s = new Date(`${date}T${start}`), e = new Date(`${date}T${end}`);
+    if (e <= s) e.setDate(e.getDate() + 1);
+    return e.toISOString();
+  }
+
+  const myRoster = () => state.profile && state.data.roster.find((r) => r.profile_id === state.profile.id && r.active);
+  const rosterName = (id) => { const r = state.data.roster.find((x) => x.id === id); return r ? r.name : 'Unknown'; };
+  const eventOf = (s) => state.data.events.find((e) => e.id === s.event_id);
+  const shiftStart = (s, e) => new Date(s.starts_at || e.starts_at);
+  const shiftEnd = (s, e) => new Date(s.ends_at || e.ends_at);
+  const isUpcoming = (e) => new Date(e.ends_at).getTime() > Date.now();
+  const shiftsOf = (e) => state.data.shifts.filter((s) => s.event_id === e.id)
+    .sort((a, b) => (a.sort_order - b.sort_order) || (shiftStart(a, e) - shiftStart(b, e)) || (a.post || '').localeCompare(b.post || ''));
+  const needsHelp = (s) => !s.roster_id || s.cover_requested;
+
+  function coverCount() {
+    const me = myRoster();
+    const soon = Date.now() + 14 * 864e5;
+    return state.data.shifts.filter((s) => {
+      const e = eventOf(s);
+      return e && isUpcoming(e) && new Date(e.starts_at).getTime() < soon && needsHelp(s) && (!me || s.roster_id !== me.id);
+    }).length;
+  }
+
+  // Returns [{ event, shifts }] after applying the current filters.
+  function scheduleRows() {
+    const f = state.sched;
+    const me = myRoster();
+    const person = f.filter === 'mine' ? (me && me.id) : f.person;
+    let events = state.data.events.filter((e) => f.filter === 'past' ? !isUpcoming(e) : isUpcoming(e));
+    events.sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
+    if (f.filter === 'past') events.reverse();
+    const rows = [];
+    for (const e of events) {
+      let shifts = shiftsOf(e);
+      if (f.filter === 'mine' && !person) shifts = [];
+      if (person) shifts = shifts.filter((s) => s.roster_id === person);
+      if (f.filter === 'cover') shifts = shifts.filter(needsHelp);
+      const filtered = person || f.filter === 'cover' || f.filter === 'mine';
+      if (filtered && !shifts.length) continue;
+      rows.push({ event: e, shifts });
+    }
+    return rows;
+  }
+
+  function scheduleView() {
+    const f = state.sched;
+    const me = myRoster();
+    const chip = (key, label) => h('button', { class: 'chip' + (f.filter === key ? ' on' : ''), onclick: () => { f.filter = key; render(); } }, label);
+    const cc = coverCount();
+    const content = [h('div', { class: 'chips' },
+      chip('upcoming', 'Upcoming'), chip('mine', 'Mine'), chip('cover', cc ? `Needs cover (${cc})` : 'Needs cover'), chip('past', 'Past'))];
+
+    const personSel = h('select', { class: 'input small-select', 'aria-label': 'Show schedule for' },
+      h('option', { value: '' }, 'Everyone'),
+      state.data.roster.filter((r) => r.active).map((r) => h('option', { value: r.id }, r.name)));
+    personSel.value = f.person;
+    personSel.addEventListener('change', () => { f.person = personSel.value; render(); });
+    content.push(h('div', { class: 'sched-tools' },
+      f.filter === 'mine' ? h('div', { class: 'grow muted small' }, me ? `Showing posts for ${me.name}` : '') : personSel,
+      h('div', { class: 'seg' },
+        h('button', { class: f.view === 'list' ? 'on' : '', onclick: () => { f.view = 'list'; render(); } }, 'List'),
+        h('button', { class: f.view === 'month' ? 'on' : '', onclick: () => { f.view = 'month'; render(); } }, 'Month')),
+      h('button', { class: 'btn small', onclick: openFeeds }, icon('calendar'), 'Subscribe')));
+
+    if (f.filter === 'mine' && !me) {
+      content.push(h('div', { class: 'notice' }, 'Your sign-in is not linked to your name on the team roster yet, so the app can\'t show "My assignments". Ask an admin to open Team → your name → Edit and choose your account under "App account".'));
+    }
+
+    const rows = scheduleRows();
+    if (f.view === 'month') content.push(monthView(rows));
+    else if (!rows.length) {
+      content.push(empty(f.filter === 'past' ? 'No past events in the last 90 days'
+        : f.filter === 'cover' ? 'Every upcoming post is covered'
+          : f.filter === 'mine' ? 'You have no upcoming assignments' : 'Nothing scheduled yet', 'calendar'));
+    } else {
+      let lastDay = '';
+      for (const r of rows) {
+        const day = ymd(new Date(r.event.starts_at));
+        if (day !== lastDay) {
+          content.push(h('div', { class: 'section-title' }, new Date(r.event.starts_at).toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' })));
+          lastDay = day;
+        }
+        content.push(eventCard(r.event, r.shifts));
+      }
+    }
+    return { title: 'Schedule', action: isAdmin() ? topAction('+ New', () => editEvent()) : null, content };
+  }
+
+  function monthView(rows) {
+    const f = state.sched;
+    const first = new Date(f.month.getFullYear(), f.month.getMonth(), 1);
+    const byDay = new Map();
+    for (const r of rows) {
+      const k = ymd(new Date(r.event.starts_at));
+      if (!byDay.has(k)) byDay.set(k, []);
+      byDay.get(k).push(r);
+    }
+    const me = myRoster();
+    const today = ymd(new Date());
+    if (!f.day) f.day = today;
+    const grid = h('div', { class: 'month-grid' }, ['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) => h('div', { class: 'dow' }, d)));
+    for (let i = 0; i < first.getDay(); i++) grid.append(h('div', {}));
+    const daysIn = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+    for (let d = 1; d <= daysIn; d++) {
+      const k = ymd(new Date(first.getFullYear(), first.getMonth(), d));
+      const dayRows = byDay.get(k) || [];
+      const mine = me && dayRows.some((r) => r.shifts.some((s) => s.roster_id === me.id));
+      const help = dayRows.some((r) => isUpcoming(r.event) && r.shifts.some(needsHelp));
+      grid.append(h('button', {
+        class: 'day' + (k === today ? ' today' : '') + (k === f.day ? ' sel' : '') + (dayRows.length ? ' has' : ''),
+        onclick: () => { f.day = k; render(); }
+      }, String(d), dayRows.length ? h('span', { class: 'dots' },
+        h('span', { class: 'dot-ev' + (mine ? ' mine' : '') }), help ? h('span', { class: 'dot-ev help' }) : null) : null));
+    }
+    const dayRows = byDay.get(f.day) || [];
+    return [
+      h('div', { class: 'month-head' },
+        h('button', { class: 'icon-btn', 'aria-label': 'Previous month', onclick: () => { f.month = new Date(first.getFullYear(), first.getMonth() - 1, 1); render(); } }, icon('back')),
+        h('div', { class: 'grow center-text' }, first.toLocaleDateString([], { month: 'long', year: 'numeric' })),
+        h('button', { class: 'icon-btn', 'aria-label': 'Next month', onclick: () => { f.month = new Date(first.getFullYear(), first.getMonth() + 1, 1); render(); } }, icon('chev'))),
+      grid,
+      h('div', { class: 'legend muted small' }, h('span', { class: 'dot-ev mine' }), ' my post ', h('span', { class: 'dot-ev' }), ' event ', h('span', { class: 'dot-ev help' }), ' needs cover'),
+      h('div', { class: 'section-title' }, dateOnly(f.day).toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' })),
+      dayRows.length ? dayRows.map((r) => eventCard(r.event, r.shifts)) : h('div', { class: 'card muted small' }, 'Nothing scheduled this day' + (state.sched.filter !== 'upcoming' ? ' (with the current filter)' : '') + '.')
+    ];
+  }
+
+  function eventCard(e, shifts) {
+    const me = myRoster();
+    const start = new Date(e.starts_at), end = new Date(e.ends_at);
+    const upcoming = isUpcoming(e);
+    const allShifts = shiftsOf(e);
+    const open = allShifts.filter((s) => !s.roster_id).length;
+    return h('article', { class: 'card event-card' + (upcoming ? '' : ' inactive') },
+      h('div', { class: 'row' },
+        h('div', { class: 'date-pill' },
+          h('div', { class: 'dp-dow' }, start.toLocaleDateString([], { weekday: 'short' })),
+          h('div', { class: 'dp-day' }, String(start.getDate()))),
+        h('div', { class: 'grow' },
+          h('h3', {}, e.title),
+          h('div', { class: 'muted small' }, timeRange(start, end) + (e.location ? ' · ' + e.location : '')),
+          open && upcoming ? h('span', { class: 'badge caution' }, `${open} open post${open > 1 ? 's' : ''}`) : null)),
+      e.notes ? h('p', { class: 'body-text small' }, e.notes) : null,
+      h('div', { class: 'shift-list' },
+        shifts.length ? shifts.map((s) => shiftRow(s, e, me, upcoming))
+          : h('div', { class: 'muted small shift-empty' }, isAdmin() ? 'No posts yet — add one below.' : 'No posts assigned yet.')),
+      isAdmin() ? h('div', { class: 'actions' },
+        h('button', { class: 'btn small', onclick: () => editShift(null, e) }, '+ Post'),
+        h('button', { class: 'btn small', onclick: () => editEvent(e) }, 'Edit event'),
+        h('button', { class: 'btn small', onclick: () => duplicateEvent(e) }, 'Duplicate')) : null);
+  }
+
+  function shiftRow(s, e, me, upcoming) {
+    const mine = me && s.roster_id === me.id;
+    const st = shiftStart(s, e), en = shiftEnd(s, e);
+    const customTime = s.starts_at || s.ends_at;
+    const actions = [];
+    if (upcoming && me) {
+      if (!s.roster_id) actions.push(h('button', { class: 'btn small primary', onclick: () => shiftAction('volunteer_shift', { p_shift: s.id }, `Volunteer for ${s.post || 'this post'} at ${e.title}?`, "You're on the schedule — thanks!") }, 'Volunteer'));
+      else if (mine && !s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => shiftAction('request_cover', { p_shift: s.id, p_on: true }, 'Ask the team to cover this post? You stay assigned until someone takes it.', 'Cover requested — the team can see it now') }, 'Need cover'));
+      else if (mine && s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => shiftAction('request_cover', { p_shift: s.id, p_on: false }, null, 'Cover request withdrawn') }, 'Cancel request'));
+      else if (s.cover_requested) actions.push(h('button', { class: 'btn small primary', onclick: () => shiftAction('cover_shift', { p_shift: s.id }, `Cover ${rosterName(s.roster_id)}'s ${s.post || 'post'} at ${e.title}?`, "You're covering — thanks!") }, "I'll cover"));
+    }
+    if (isAdmin()) actions.push(h('button', { class: 'btn small', onclick: () => editShift(s, e) }, 'Edit'));
+    return h('div', { class: 'shift' + (mine ? ' mine' : '') },
+      h('div', { class: 'grow' },
+        h('div', { class: 'shift-post' }, s.post || 'Post', customTime ? h('span', { class: 'muted small' }, ' · ' + timeRange(st, en)) : null),
+        h('div', { class: 'shift-person' },
+          s.roster_id ? h('span', {}, rosterName(s.roster_id) + (mine ? ' (you)' : '')) : h('span', { class: 'badge caution' }, 'Open'),
+          s.cover_requested ? h('span', { class: 'badge urgent' }, 'Needs cover') : null),
+        s.note ? h('div', { class: 'muted small' }, s.note) : null,
+        s.last_change ? h('div', { class: 'muted tiny' }, `${s.last_change} · ${relTime(s.updated_at)}`) : null),
+      actions.length ? h('div', { class: 'shift-actions' }, actions) : null);
+  }
+
+  async function shiftAction(fn, args, confirmText, doneText) {
+    if (confirmText && !confirm(confirmText)) return;
+    const { error } = await sb.rpc(fn, args);
+    if (error) { toast(friendlyError(error), 4000); await refreshTable('shifts'); render(); return; }
+    await refreshTable('shifts');
+    render();
+    toast(doneText);
+  }
+
+  function knownPosts() {
+    return [...new Set(state.data.shifts.map((s) => s.post).filter(Boolean))].sort();
+  }
+  // Suggest the posts from a typical recent event (the fullest of the last 10).
+  function lastEventPosts() {
+    const recent = state.data.events.slice().sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at)).slice(0, 10);
+    let best = [];
+    for (const e of recent) { const p = shiftsOf(e).map((s) => s.post).filter(Boolean); if (p.length > best.length) best = p; }
+    return best;
+  }
+
+  function editEvent(e) {
+    const isNew = !e;
+    const s = e ? new Date(e.starts_at) : null, en = e ? new Date(e.ends_at) : null;
+    const nextSunday = new Date(); nextSunday.setDate(nextSunday.getDate() + ((7 - nextSunday.getDay()) % 7 || 7));
+    openForm({
+      title: isNew ? 'New event' : 'Edit event',
+      values: isNew
+        ? { date: ymd(nextSunday), start: '08:30', end: '10:30', posts: lastEventPosts().join('\n'), repeat: 0 }
+        : { title: e.title, date: ymd(s), start: hm(s), end: hm(en), location: e.location, notes: e.notes },
+      fields: [
+        { name: 'title', label: 'Service / event', required: true, placeholder: 'e.g. Sunday Worship', list: [...new Set(state.data.events.map((x) => x.title))] },
+        { name: 'date', label: 'Date', type: 'date', required: true },
+        { name: 'start', label: 'Security starts', type: 'time', required: true },
+        { name: 'end', label: 'Security ends', type: 'time', required: true, hint: 'An end time earlier than the start is treated as the next day.' },
+        { name: 'location', label: 'Location', placeholder: 'Campus or building' },
+        { name: 'notes', label: 'Notes for the team', type: 'textarea', rows: 3 },
+        ...(isNew ? [
+          { name: 'posts', label: 'Posts (one per line)', type: 'textarea', rows: 5, placeholder: 'Parking lot\nSanctuary\nChildren\'s wing', hint: 'Each post starts open. Assign people after saving, or let them volunteer.' },
+          { name: 'repeat', label: 'Also create it for the next … weeks', type: 'number', inputmode: 'numeric', hint: '0 = just this date. Up to 12.' }
+        ] : [])
+      ],
+      onSubmit: async (v) => {
+        const row = { title: v.title, starts_at: localIso(v.date, v.start), ends_at: endIso(v.date, v.start, v.end), location: v.location, notes: v.notes };
+        if (!isNew) { await saveRow('events', e.id, row); await afterSaveSchedule('Event saved'); return; }
+        const weeks = Math.max(0, Math.min(12, Math.floor(v.repeat || 0)));
+        const posts = (v.posts || '').split('\n').map((x) => x.trim()).filter(Boolean);
+        for (let w = 0; w <= weeks; w++) {
+          const shift = (iso) => { const d = new Date(iso); d.setDate(d.getDate() + 7 * w); return d.toISOString(); };
+          const { data, error } = await sb.from('events').insert({ ...row, starts_at: shift(row.starts_at), ends_at: shift(row.ends_at) }).select('id').single();
+          if (error) throw error;
+          if (posts.length) {
+            const { error: e2 } = await sb.from('shifts').insert(posts.map((p, i) => ({ event_id: data.id, post: p, sort_order: i })));
+            if (e2) throw e2;
+          }
+        }
+        await afterSaveSchedule(weeks ? `Created ${weeks + 1} events` : 'Event created');
+      },
+      onDelete: isNew ? null : async () => { await deleteRow('events', e.id); await afterSaveSchedule('Event deleted'); },
+      deleteConfirm: 'Delete this event and all of its posts? It will disappear from everyone\'s calendars.'
+    });
+  }
+
+  function duplicateEvent(e) {
+    const s = new Date(e.starts_at);
+    const next = new Date(s); next.setDate(next.getDate() + 7);
+    openForm({
+      title: 'Duplicate event',
+      values: { date: ymd(next), keep: true },
+      fields: [
+        { name: 'date', label: 'New date', type: 'date', required: true },
+        { name: 'keep', label: 'Keep the same people assigned', type: 'checkbox' }
+      ],
+      submitLabel: 'Duplicate',
+      onSubmit: async (v) => {
+        const delta = new Date(`${v.date}T${hm(s)}`) - s;
+        const move = (iso) => iso ? new Date(new Date(iso).getTime() + delta).toISOString() : null;
+        const { data, error } = await sb.from('events').insert({ title: e.title, starts_at: move(e.starts_at), ends_at: move(e.ends_at), location: e.location, notes: e.notes }).select('id').single();
+        if (error) throw error;
+        const rows = shiftsOf(e).map((x) => ({ event_id: data.id, post: x.post, starts_at: move(x.starts_at), ends_at: move(x.ends_at), roster_id: v.keep ? x.roster_id : null, note: x.note, sort_order: x.sort_order }));
+        if (rows.length) { const { error: e2 } = await sb.from('shifts').insert(rows); if (e2) throw e2; }
+        await afterSaveSchedule('Event duplicated');
+      }
+    });
+  }
+
+  function editShift(s, e) {
+    const isNew = !s;
+    s = s || {};
+    const st = s.starts_at ? new Date(s.starts_at) : null, en = s.ends_at ? new Date(s.ends_at) : null;
+    openForm({
+      title: isNew ? `Add post — ${e.title}` : `Edit post — ${e.title}`,
+      values: { post: s.post || '', roster_id: s.roster_id || '', start: st ? hm(st) : '', end: en ? hm(en) : '', note: s.note || '', cover_requested: !!s.cover_requested, sort_order: s.sort_order || 0 },
+      fields: [
+        { name: 'post', label: 'Post', required: true, placeholder: 'e.g. Parking lot', list: knownPosts() },
+        { name: 'roster_id', label: 'Assigned to', type: 'select', options: [['', 'Open — needs a volunteer'], ...state.data.roster.filter((r) => r.active || r.id === s.roster_id).map((r) => [r.id, r.name])] },
+        { name: 'start', label: 'Start (optional)', type: 'time', hint: `Leave both times blank to use the event time (${timeRange(new Date(e.starts_at), new Date(e.ends_at))}).` },
+        { name: 'end', label: 'End (optional)', type: 'time' },
+        { name: 'note', label: 'Note', placeholder: 'e.g. Bring radio, meet at east door' },
+        ...(isNew ? [] : [{ name: 'cover_requested', label: 'Needs cover', type: 'checkbox' }]),
+        { name: 'sort_order', label: 'Sort order', type: 'number', inputmode: 'numeric' }
+      ],
+      onSubmit: async (v) => {
+        if (!!v.start !== !!v.end) throw new Error('Enter both a start and end time, or leave both blank.');
+        const day = ymd(new Date(e.starts_at));
+        const row = {
+          post: v.post, roster_id: v.roster_id || null, note: v.note, sort_order: v.sort_order,
+          starts_at: v.start ? localIso(day, v.start) : null,
+          ends_at: v.start ? endIso(day, v.start, v.end) : null
+        };
+        if (!isNew) row.cover_requested = v.cover_requested;
+        if (isNew) row.event_id = e.id;
+        await saveRow('shifts', s.id, row);
+        await afterSaveSchedule('Post saved');
+      },
+      onDelete: isNew ? null : async () => { await deleteRow('shifts', s.id); await afterSaveSchedule('Post removed'); }
+    });
+  }
+
+  async function afterSaveSchedule(msg) {
+    await Promise.all([refreshTable('events'), refreshTable('shifts')]);
+    render();
+    if (msg) toast(msg);
+  }
+
+  // ------------------------------------------------------------------
+  // Calendar subscription links
+  // ------------------------------------------------------------------
+  const feedUrl = (f) => `${location.origin}/cal/${f.token}.ics`;
+  const webcalUrl = (f) => feedUrl(f).replace(/^https?:/, 'webcal:');
+
+  function openFeeds() {
+    const me = myRoster();
+    const feeds = state.data.calendar_feeds;
+    const body = [
+      h('p', { class: 'small' }, 'Subscribe once and your security posts appear in your phone\'s calendar. When you volunteer, swap or cover, it updates on its own.'),
+      h('p', { class: 'muted small' }, 'Calendar apps check for changes on their own schedule: iPhone every 15 minutes to an hour (Settings → Calendar → Accounts → Fetch), Google every few hours.')
+    ];
+    if (!feeds.length) body.push(h('div', { class: 'card muted small' }, 'You have no calendar links yet.'));
+    for (const f of feeds) {
+      const who = f.roster_id ? rosterName(f.roster_id) : 'Whole team';
+      const input = h('input', { class: 'input small-input', readonly: true, value: feedUrl(f), 'aria-label': 'Calendar link' });
+      body.push(h('div', { class: 'card feed' },
+        h('div', { class: 'row' }, h('div', { class: 'grow' }, h('strong', {}, f.name), h('div', { class: 'muted small' }, 'Shows: ' + who))),
+        h('div', { class: 'actions' },
+          h('a', { class: 'btn small primary', href: webcalUrl(f) }, 'iPhone / Mac'),
+          h('a', { class: 'btn small', href: 'https://calendar.google.com/calendar/render?cid=' + encodeURIComponent(webcalUrl(f)), target: '_blank', rel: 'noopener' }, 'Google'),
+          h('a', { class: 'btn small', href: 'https://outlook.live.com/calendar/0/addfromweb?url=' + encodeURIComponent(feedUrl(f)) + '&name=' + encodeURIComponent(f.name), target: '_blank', rel: 'noopener' }, 'Outlook')),
+        input,
+        h('div', { class: 'actions' },
+          h('button', {
+            class: 'btn small', onclick: async () => {
+              try { await navigator.clipboard.writeText(feedUrl(f)); toast('Link copied'); } catch { input.select(); toast('Select and copy the link'); }
+            }
+          }, 'Copy link'),
+          h('button', {
+            class: 'btn small danger', onclick: async () => {
+              if (!confirm(`Turn off "${f.name}"? Calendars subscribed to it will stop updating.`)) return;
+              const { error } = await sb.from('calendar_feeds').delete().eq('id', f.id);
+              if (error) { toast(friendlyError(error)); return; }
+              await refreshTable('calendar_feeds'); dlg.close(); openFeeds();
+            }
+          }, 'Turn off'))));
+    }
+    body.push(h('p', { class: 'muted small' }, 'Family calendar: open the link on the family calendar\'s account, or send it to family members to subscribe. Anyone with the link can see those assignments, so share it only with people you trust. "Turn off" stops a link at any time.'));
+    const dlg = openDialog({
+      title: 'Calendar subscriptions',
+      body,
+      buttons: (close) => [
+        h('button', { class: 'btn', onclick: close }, 'Close'),
+        h('button', { class: 'btn primary', onclick: () => { close(); newFeed(me); } }, '+ New calendar link')
+      ]
+    });
+  }
+
+  function newFeed(me) {
+    const people = state.data.roster.filter((r) => r.active);
+    openForm({
+      title: 'New calendar link',
+      values: { roster_id: me ? me.id : '', name: me ? 'Security – My assignments' : 'Security – Team schedule' },
+      fields: [
+        { name: 'roster_id', label: 'Whose posts?', type: 'select', options: [...(me ? [[me.id, `Mine (${me.name})`]] : []), ...people.filter((r) => !me || r.id !== me.id).map((r) => [r.id, r.name]), ['', 'Whole team (every post)']] },
+        { name: 'name', label: 'Calendar name', required: true, hint: 'This is what the calendar is called in your calendar app.' }
+      ],
+      submitLabel: 'Create link',
+      onSubmit: async (v) => {
+        const { error } = await sb.from('calendar_feeds').insert({ name: v.name, roster_id: v.roster_id || null });
+        if (error) throw error;
+        await refreshTable('calendar_feeds');
+        setTimeout(openFeeds, 0);
+      }
     });
   }
 
