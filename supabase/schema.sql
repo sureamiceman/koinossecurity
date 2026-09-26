@@ -5,6 +5,38 @@
 -- policies and triggers are replaced.
 -- =====================================================================
 
+-- ---------------------------------------------------------------------
+-- Clear out tables left over from an older version of the app that use
+-- the same names but a different layout. Empty ones are replaced; if an
+-- old table still has data, stop and change nothing.
+-- ---------------------------------------------------------------------
+do $$
+declare
+  t record;
+  n bigint;
+begin
+  for t in
+    select * from (values
+      ('events', 'starts_at'), ('shifts', 'cover_requested'), ('calendar_feeds', 'token'),
+      ('sops', 'body'), ('contacts', 'alt_phone'), ('bulletins', 'kind'),
+      ('roster', 'medical_notes'), ('profiles', 'email')
+    ) as v(tbl, col)
+  loop
+    if to_regclass('public.' || t.tbl) is not null and not exists (
+      select 1 from information_schema.columns
+       where table_schema = 'public' and table_name = t.tbl and column_name = t.col
+    ) then
+      execute format('select count(*) from public.%I', t.tbl) into n;
+      -- Old profiles are safe to drop: they are rebuilt from sign-ins below.
+      if n > 0 and t.tbl <> 'profiles' then
+        raise exception 'Table public.% is from an older version of the app and still has % row(s). Nothing was changed.', t.tbl, n;
+      end if;
+      execute format('drop table public.%I cascade', t.tbl);
+      raise notice 'Replaced old-layout table public.%', t.tbl;
+    end if;
+  end loop;
+end $$;
+
 
 -- ---------------------------------------------------------------------
 -- Profiles (one per signed-in person) and roles
