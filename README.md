@@ -5,7 +5,9 @@ Progressive Web App (PWA) for the Koinos church security team. It installs on iP
 - **Alerts**: safety bulletins and BOLOs with photos, priority (info / caution / urgent), optional expiry. New posts appear live on everyone's open app.
 - **SOPs**: searchable procedures grouped by category, with one-step rollback to the previous version.
 - **Contacts**: emergency contacts with tap-to-call, plus a Call 911 button.
-- **Schedule**: services/events with posts. Members volunteer for open posts, ask for cover, or cover for someone; admins assign, duplicate and repeat events. List and month views, filters for Mine / Needs cover / any person.
+- **Schedule**: services/events with posts. Members volunteer for open posts, ask for cover, or cover for someone; admins assign people. List and month views, filters for Mine / Needs cover / any person.
+- **Repeating events** (like a phone calendar): daily, weekly on chosen days, every 2 weeks, or monthly (same date, e.g. 2nd Sunday, or last Sunday), with an optional end date. Posts, CCW requirements and default people carry to every date. Edits ask *This event only / This and following / All events*; swaps and one-off changes on specific dates are kept. Dates are generated about 6 months ahead and keep rolling forward.
+- **CCW posts**: a post can require a CCW-qualified person. Members without a current qualification (on that event's date) can't volunteer for or cover it; admins are warned before assigning someone who isn't qualified.
 - **Calendar subscriptions**: each person can create private links (their own posts, anyone's, or the whole team) that iPhone, Google and Outlook calendars subscribe to. Events read "Security Sunday Worship: 8:15–10:30 AM" and update when posts change.
 - **Team**: roster with photos, tap to call/text, Medical and CCW filters. CCW qualification with expiry date; admins are warned 30 days before it expires.
 - **Users**: approve sign-ups; superusers grant/revoke admin.

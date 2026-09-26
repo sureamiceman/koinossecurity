@@ -81,7 +81,7 @@ export function buildIcs(feed) {
     if (feed.filtered && ev.cover_requested) summary += ' – cover requested';
 
     const desc = [
-      ev.post ? `Post: ${ev.post}` : null,
+      ev.post ? `Post: ${ev.post}${ev.requires_ccw ? ' (CCW post)' : ''}` : null,
       `Assigned: ${ev.person || 'Open – needs a volunteer'}`,
       ev.cover_requested ? 'Cover has been requested for this post.' : null,
       ev.notes ? `\n${ev.notes}` : null,

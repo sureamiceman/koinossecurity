@@ -318,3 +318,20 @@ input:focus, select:focus, textarea:focus, .btn:focus-visible, .chip:focus-visib
 .legend { display: flex; gap: 4px; align-items: center; margin: 8px 4px 0; flex-wrap: wrap; }
 .small-input { font-size: .8rem; padding: 8px 10px; margin-top: 10px; width: 100%; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
 .feed .actions { margin-top: 10px; }
+
+/* ---------- Repeating events / posts editor ---------- */
+.weekday-row { display: flex; gap: 6px; }
+.weekday-row .wd { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--border); background: var(--bg); font-weight: 700; cursor: pointer; }
+.weekday-row .wd.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.posts-editor { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.pe-row { border: 1px solid var(--border); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px; background: var(--bg); margin-bottom: 8px; }
+.pe-line { display: flex; gap: 8px; align-items: center; }
+.pe-name { flex: 1; min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.pe-who { flex: 1; min-width: 0; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.pe-ccw { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: .88rem; white-space: nowrap; }
+.pe-ccw input { width: 20px; height: 20px; }
+.pe-rm svg { width: 20px; height: 20px; }
+.pe-warn { color: var(--urgent); font-size: .82rem; }
+.badge.inline { margin-left: 6px; vertical-align: 2px; }
+.repeat-line { margin-top: 2px; }
+.dlg-foot .btn { flex: 0 0 auto; }

@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [] });
   const state = {
     session: null,
     profile: null,
@@ -164,7 +164,9 @@
     profiles: (t) => t.select('*').order('full_name'),
     events: (t) => t.select('*').gte('ends_at', since()).order('starts_at'),
     shifts: (t) => t.select('*, events!inner(ends_at)').gte('events.ends_at', since()).order('sort_order'),
-    calendar_feeds: (t) => t.select('*').order('created_at')
+    calendar_feeds: (t) => t.select('*').order('created_at'),
+    event_series: (t) => t.select('*'),
+    series_posts: (t) => t.select('*').order('sort_order')
   };
 
   function loadCachedData() {
@@ -184,6 +186,10 @@
   }
 
   async function refreshAll(showToast) {
+    if (isMember() && Date.now() - (state.extendedAt || 0) > 12 * 3600 * 1000) {
+      state.extendedAt = Date.now();
+      try { await sb.rpc('extend_series'); } catch { /* offline */ }
+    }
     const errors = (await Promise.all(Object.keys(QUERIES).map(refreshTable))).filter(Boolean);
     await resolvePhotos();
     render();
@@ -303,23 +309,25 @@
     return { close };
   }
 
-  function openForm({ title, fields, values = {}, submitLabel = 'Save', onSubmit, onDelete, deleteLabel = 'Delete', deleteConfirm }) {
+  // Generic form dialog. Field types: text (default), textarea, select, checkbox,
+  // number, date, time, tel, email, password, photo, weekdays, posts.
+  // A field may have visible(values) to show/hide it as other fields change.
+  function openForm({ title, fields, values = {}, submitLabel = 'Save', onSubmit, onDelete, deleteLabel = 'Delete', deleteConfirm, intro }) {
     const dlg = h('dialog', {});
-    const inputs = {};
+    const getters = {};
+    const wraps = {};
     const photo = { file: null, remove: false };
-    const body = h('div', { class: 'dlg-body' });
+    const body = h('div', { class: 'dlg-body' }, intro || null);
 
     for (const f of fields) {
       const id = 'f_' + f.name;
-      let input;
+      let wrap;
       if (f.type === 'checkbox') {
-        input = h('input', { type: 'checkbox', id });
+        const input = h('input', { type: 'checkbox', id });
         input.checked = values[f.name] != null ? !!values[f.name] : !!f.default;
-        inputs[f.name] = input;
-        body.append(h('div', { class: 'field check' }, h('label', { for: id }, input, f.label), f.hint && h('div', { class: 'hint' }, f.hint)));
-        continue;
-      }
-      if (f.type === 'photo') {
+        getters[f.name] = () => input.checked;
+        wrap = h('div', { class: 'field check' }, h('label', { for: id }, input, f.label), f.hint && h('div', { class: 'hint' }, f.hint));
+      } else if (f.type === 'photo') {
         const preview = h('img', { class: 'preview' + (f.currentUrl ? '' : ' hidden'), alt: '' });
         if (f.currentUrl) preview.src = f.currentUrl;
         const file = h('input', { type: 'file', accept: 'image/*', id });
@@ -339,37 +347,69 @@
           preview.classList.add('hidden');
           removeBtn.classList.add('hidden');
         });
-        body.append(h('div', { class: 'field photo-field' }, h('label', { for: id }, f.label), preview, file,
-          h('div', { class: 'actions' }, removeBtn), f.hint && h('div', { class: 'hint' }, f.hint)));
-        continue;
-      }
-      if (f.type === 'textarea') {
-        input = h('textarea', { id, rows: f.rows || 8 });
-      } else if (f.type === 'select') {
-        input = h('select', { id }, f.options.map(([v, l]) => h('option', { value: v }, l)));
+        wrap = h('div', { class: 'field photo-field' }, h('label', { for: id }, f.label), preview, file,
+          h('div', { class: 'actions' }, removeBtn), f.hint && h('div', { class: 'hint' }, f.hint));
+      } else if (f.type === 'weekdays') {
+        const sel = new Set(values[f.name] || f.default || []);
+        const names = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+        const full = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        const row = h('div', { class: 'weekday-row', role: 'group', 'aria-label': f.label });
+        names.forEach((n, i) => {
+          const b = h('button', { type: 'button', class: 'wd' + (sel.has(i) ? ' on' : ''), 'aria-pressed': sel.has(i) ? 'true' : 'false', title: full[i] }, n);
+          b.addEventListener('click', () => {
+            if (sel.has(i)) sel.delete(i); else sel.add(i);
+            b.classList.toggle('on', sel.has(i));
+            b.setAttribute('aria-pressed', sel.has(i) ? 'true' : 'false');
+            refreshVisibility();
+          });
+          row.append(b);
+        });
+        getters[f.name] = () => [...sel].sort();
+        wrap = h('div', { class: 'field' }, h('label', {}, f.label), row, f.hint && h('div', { class: 'hint' }, f.hint));
+      } else if (f.type === 'posts') {
+        const editor = postsEditor(values[f.name] || [], f);
+        getters[f.name] = editor.get;
+        wrap = h('div', { class: 'field' }, h('label', {}, f.label), f.hint && h('div', { class: 'hint' }, f.hint), editor.el);
       } else {
-        input = h('input', { type: f.type || 'text', id, autocomplete: f.autocomplete || 'off', inputmode: f.inputmode, placeholder: f.placeholder, list: f.list ? id + '_list' : null });
+        let input;
+        if (f.type === 'textarea') input = h('textarea', { id, rows: f.rows || 8 });
+        else if (f.type === 'select') input = h('select', { id }, f.options.map(([v, l]) => h('option', { value: v }, l)));
+        else input = h('input', { type: f.type || 'text', id, autocomplete: f.autocomplete || 'off', inputmode: f.inputmode, placeholder: f.placeholder, list: f.list ? id + '_list' : null });
+        const v = values[f.name];
+        input.value = v != null ? v : (f.default != null ? f.default : (f.type === 'select' ? f.options[0][0] : ''));
+        getters[f.name] = () => f.type === 'number' ? Number(input.value || 0)
+          : f.type === 'password' ? input.value : input.value.trim();
+        getters[f.name].el = input;
+        wrap = h('div', { class: 'field' },
+          h('label', { for: id }, f.label + (f.required ? ' *' : '')), input,
+          f.list ? h('datalist', { id: id + '_list' }, f.list.map((o) => h('option', { value: o }))) : null,
+          f.hint && h('div', { class: 'hint' }, typeof f.hint === 'function' ? '' : f.hint));
       }
-      const v = values[f.name];
-      input.value = v != null ? v : (f.default != null ? f.default : (f.type === 'select' ? f.options[0][0] : ''));
-      inputs[f.name] = input;
-      body.append(h('div', { class: 'field' },
-        h('label', { for: id }, f.label + (f.required ? ' *' : '')), input,
-        f.list ? h('datalist', { id: id + '_list' }, f.list.map((o) => h('option', { value: o }))) : null,
-        f.hint && h('div', { class: 'hint' }, f.hint)));
+      wraps[f.name] = wrap;
+      body.append(wrap);
     }
+
+    const collect = () => { const out = {}; for (const f of fields) if (getters[f.name]) out[f.name] = getters[f.name](); return out; };
+    function refreshVisibility() {
+      const vals = collect();
+      for (const f of fields) if (f.visible) wraps[f.name].classList.toggle('hidden', !f.visible(vals));
+    }
+    body.addEventListener('input', refreshVisibility);
+    body.addEventListener('change', refreshVisibility);
+    refreshVisibility();
 
     const err = h('div', { class: 'error-text hidden' });
     body.append(err);
     const saveBtn = h('button', { type: 'submit', class: 'btn primary' }, submitLabel);
-    const showErr = (m) => { err.textContent = m; err.classList.remove('hidden'); };
+    const showErr = (m) => { err.textContent = m; err.classList.remove('hidden'); err.scrollIntoView({ block: 'nearest' }); };
 
     const foot = h('div', { class: 'dlg-foot' },
       onDelete ? h('button', {
         type: 'button', class: 'btn danger', onclick: async (e) => {
-          if (!confirm(deleteConfirm || 'Delete this? This cannot be undone.')) return;
-          e.currentTarget.disabled = true;
-          try { await onDelete(); dlg.close(); } catch (ex) { showErr(friendlyError(ex)); e.currentTarget.disabled = false; }
+          if (deleteConfirm !== false && !confirm(deleteConfirm || 'Delete this? This cannot be undone.')) return;
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          try { await onDelete(); dlg.close(); } catch (ex) { showErr(friendlyError(ex)); btn.disabled = false; }
         }
       }, deleteLabel) : null,
       h('div', { class: 'spacer' }),
@@ -381,15 +421,14 @@
       onsubmit: async (e) => {
         e.preventDefault();
         err.classList.add('hidden');
-        const out = {};
+        const out = collect();
         for (const f of fields) {
-          if (f.type === 'photo') continue;
-          const el = inputs[f.name];
-          if (f.type === 'checkbox') out[f.name] = el.checked;
-          else if (f.type === 'number') out[f.name] = Number(el.value || 0);
-          else if (f.type === 'password') out[f.name] = el.value;
-          else out[f.name] = el.value.trim();
-          if (f.required && !out[f.name]) { showErr(`${f.label} is required.`); el.focus(); return; }
+          if (f.visible && !f.visible(out)) continue;
+          if (f.required && !out[f.name]) {
+            showErr(`${f.label} is required.`);
+            if (getters[f.name].el) getters[f.name].el.focus();
+            return;
+          }
         }
         saveBtn.disabled = true;
         saveBtn.textContent = 'Saving…';
@@ -411,6 +450,52 @@
     dlg.addEventListener('close', () => dlg.remove());
     document.body.append(dlg);
     dlg.showModal();
+  }
+
+  // Rows of: post name · CCW required · default person · remove
+  function postsEditor(initial, f) {
+    const el = h('div', { class: 'posts-editor' });
+    const list = h('div', {});
+    const rows = [];
+    const people = state.data.roster.filter((r) => r.active);
+    const listId = 'posts_' + Math.random().toString(36).slice(2);
+    const addRow = (p = {}) => {
+      const name = h('input', { type: 'text', class: 'pe-name', placeholder: 'Post (e.g. Parking lot)', list: listId, 'aria-label': 'Post name' });
+      name.value = p.post || '';
+      const ccw = h('input', { type: 'checkbox', 'aria-label': 'CCW required' });
+      ccw.checked = !!p.requires_ccw;
+      const who = h('select', { class: 'pe-who', 'aria-label': f.personLabel || 'Default person' },
+        h('option', { value: '' }, f.openLabel || 'Open'),
+        people.map((r) => h('option', { value: r.id }, r.name + (r.ccw_qualified && (!r.ccw_expires_on || daysUntil(r.ccw_expires_on) >= 0) ? ' · CCW' : ''))));
+      who.value = p.roster_id || '';
+      const warn = h('div', { class: 'pe-warn hidden' });
+      const check = () => {
+        const r = people.find((x) => x.id === who.value);
+        const bad = ccw.checked && r && !(r.ccw_qualified && (!r.ccw_expires_on || daysUntil(r.ccw_expires_on) >= 0));
+        warn.textContent = bad ? `${r.name} isn't CCW-qualified (or it has expired).` : '';
+        warn.classList.toggle('hidden', !bad);
+      };
+      ccw.addEventListener('change', check);
+      who.addEventListener('change', check);
+      const row = { id: p.id || null, name, ccw, who };
+      const rm = h('button', { type: 'button', class: 'icon-btn pe-rm', 'aria-label': 'Remove post', onclick: () => { rows.splice(rows.indexOf(row), 1); rowEl.remove(); } }, icon('x'));
+      const rowEl = h('div', { class: 'pe-row' },
+        h('div', { class: 'pe-line' }, name, rm),
+        h('div', { class: 'pe-line' }, h('label', { class: 'pe-ccw' }, ccw, 'CCW required'), who),
+        warn);
+      rows.push(row);
+      list.append(rowEl);
+      check();
+    };
+    (initial.length ? initial : []).forEach(addRow);
+    el.append(list,
+      h('datalist', { id: listId }, knownPosts().map((o) => h('option', { value: o }))),
+      h('button', { type: 'button', class: 'btn small', onclick: () => { addRow(); list.lastChild.querySelector('input').focus(); } }, '+ Add post'));
+    return {
+      el,
+      get: () => rows.map((r) => ({ id: r.id, post: r.name.value.trim(), requires_ccw: r.ccw.checked, roster_id: r.who.value || null }))
+        .filter((r) => r.post)
+    };
   }
 
   async function saveRow(table, id, row) {
@@ -1179,12 +1264,39 @@
     ];
   }
 
+  // CCW valid on the date of an event (local date string).
+  function ccwOkOn(r, iso) {
+    if (!r || !r.ccw_qualified) return false;
+    if (!r.ccw_expires_on) return true;
+    return r.ccw_expires_on >= ymd(new Date(iso));
+  }
+  const seriesOf = (e) => e.series_id && state.data.event_series.find((s) => s.id === e.series_id);
+
+  function repeatLabel(s) {
+    if (!s) return '';
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const start = dateOnly(s.starts_on);
+    let t;
+    if (s.freq === 'daily') t = s.interval_n > 1 ? `Every ${s.interval_n} days` : 'Daily';
+    else if (s.freq === 'weekly') {
+      const wd = (s.by_weekday && s.by_weekday.length ? s.by_weekday : [start.getDay()]).map((d) => days[d]).join(', ');
+      t = (s.interval_n === 2 ? 'Every 2 weeks on ' : s.interval_n > 1 ? `Every ${s.interval_n} weeks on ` : 'Weekly on ') + wd;
+    } else {
+      const nth = ['1st', '2nd', '3rd', '4th', '5th'][Math.ceil(start.getDate() / 7) - 1];
+      t = s.monthly_mode === 'nth' ? `Monthly on the ${nth} ${days[start.getDay()]}`
+        : s.monthly_mode === 'last' ? `Monthly on the last ${days[start.getDay()]}`
+          : `Monthly on day ${start.getDate()}`;
+    }
+    return t + (s.until ? ` until ${fmtDay(s.until)}` : '');
+  }
+
   function eventCard(e, shifts) {
     const me = myRoster();
     const start = new Date(e.starts_at), end = new Date(e.ends_at);
     const upcoming = isUpcoming(e);
     const allShifts = shiftsOf(e);
     const open = allShifts.filter((s) => !s.roster_id).length;
+    const series = seriesOf(e);
     return h('article', { class: 'card event-card' + (upcoming ? '' : ' inactive') },
       h('div', { class: 'row' },
         h('div', { class: 'date-pill' },
@@ -1193,6 +1305,7 @@
         h('div', { class: 'grow' },
           h('h3', {}, e.title),
           h('div', { class: 'muted small' }, timeRange(start, end) + (e.location ? ' · ' + e.location : '')),
+          series ? h('div', { class: 'muted tiny repeat-line' }, '↻ ' + repeatLabel(series) + (e.is_exception ? ' · changed for this date' : '')) : null,
           open && upcoming ? h('span', { class: 'badge caution' }, `${open} open post${open > 1 ? 's' : ''}`) : null)),
       e.notes ? h('p', { class: 'body-text small' }, e.notes) : null,
       h('div', { class: 'shift-list' },
@@ -1201,26 +1314,39 @@
       isAdmin() ? h('div', { class: 'actions' },
         h('button', { class: 'btn small', onclick: () => editShift(null, e) }, '+ Post'),
         h('button', { class: 'btn small', onclick: () => editEvent(e) }, 'Edit event'),
-        h('button', { class: 'btn small', onclick: () => duplicateEvent(e) }, 'Duplicate')) : null);
+        series ? null : h('button', { class: 'btn small', onclick: () => duplicateEvent(e) }, 'Duplicate')) : null);
   }
 
   function shiftRow(s, e, me, upcoming) {
     const mine = me && s.roster_id === me.id;
     const st = shiftStart(s, e), en = shiftEnd(s, e);
     const customTime = s.starts_at || s.ends_at;
+    const assigned = s.roster_id && state.data.roster.find((r) => r.id === s.roster_id);
+    const notCcw = s.requires_ccw && s.roster_id && !ccwOkOn(assigned, e.starts_at);
+    const iCanCcw = !s.requires_ccw || ccwOkOn(me, e.starts_at);
     const actions = [];
     if (upcoming && me) {
-      if (!s.roster_id) actions.push(h('button', { class: 'btn small primary', onclick: () => shiftAction('volunteer_shift', { p_shift: s.id }, `Volunteer for ${s.post || 'this post'} at ${e.title}?`, "You're on the schedule — thanks!") }, 'Volunteer'));
-      else if (mine && !s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => shiftAction('request_cover', { p_shift: s.id, p_on: true }, 'Ask the team to cover this post? You stay assigned until someone takes it.', 'Cover requested — the team can see it now') }, 'Need cover'));
+      if (!s.roster_id) {
+        actions.push(iCanCcw
+          ? h('button', { class: 'btn small primary', onclick: () => shiftAction('volunteer_shift', { p_shift: s.id }, `Volunteer for ${s.post || 'this post'} at ${e.title}?`, "You're on the schedule — thanks!") }, 'Volunteer')
+          : h('span', { class: 'muted tiny' }, 'CCW required'));
+      } else if (mine && !s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => shiftAction('request_cover', { p_shift: s.id, p_on: true }, 'Ask the team to cover this post? You stay assigned until someone takes it.', 'Cover requested — the team can see it now') }, 'Need cover'));
       else if (mine && s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => shiftAction('request_cover', { p_shift: s.id, p_on: false }, null, 'Cover request withdrawn') }, 'Cancel request'));
-      else if (s.cover_requested) actions.push(h('button', { class: 'btn small primary', onclick: () => shiftAction('cover_shift', { p_shift: s.id }, `Cover ${rosterName(s.roster_id)}'s ${s.post || 'post'} at ${e.title}?`, "You're covering — thanks!") }, "I'll cover"));
+      else if (s.cover_requested) {
+        actions.push(iCanCcw
+          ? h('button', { class: 'btn small primary', onclick: () => shiftAction('cover_shift', { p_shift: s.id }, `Cover ${rosterName(s.roster_id)}'s ${s.post || 'post'} at ${e.title}?`, "You're covering — thanks!") }, "I'll cover")
+          : h('span', { class: 'muted tiny' }, 'CCW required'));
+      }
     }
     if (isAdmin()) actions.push(h('button', { class: 'btn small', onclick: () => editShift(s, e) }, 'Edit'));
     return h('div', { class: 'shift' + (mine ? ' mine' : '') },
       h('div', { class: 'grow' },
-        h('div', { class: 'shift-post' }, s.post || 'Post', customTime ? h('span', { class: 'muted small' }, ' · ' + timeRange(st, en)) : null),
+        h('div', { class: 'shift-post' }, s.post || 'Post',
+          s.requires_ccw ? h('span', { class: 'badge ccw inline' }, 'CCW') : null,
+          customTime ? h('span', { class: 'muted small' }, ' · ' + timeRange(st, en)) : null),
         h('div', { class: 'shift-person' },
           s.roster_id ? h('span', {}, rosterName(s.roster_id) + (mine ? ' (you)' : '')) : h('span', { class: 'badge caution' }, 'Open'),
+          notCcw ? h('span', { class: 'badge urgent' }, 'Not CCW') : null,
           s.cover_requested ? h('span', { class: 'badge urgent' }, 'Needs cover') : null),
         s.note ? h('div', { class: 'muted small' }, s.note) : null,
         s.last_change ? h('div', { class: 'muted tiny' }, `${s.last_change} · ${relTime(s.updated_at)}`) : null),
@@ -1230,62 +1356,160 @@
   async function shiftAction(fn, args, confirmText, doneText) {
     if (confirmText && !confirm(confirmText)) return;
     const { error } = await sb.rpc(fn, args);
-    if (error) { toast(friendlyError(error), 4000); await refreshTable('shifts'); render(); return; }
+    if (error) { toast(friendlyError(error), 5000); await refreshTable('shifts'); render(); return; }
     await refreshTable('shifts');
     render();
     toast(doneText);
   }
 
   function knownPosts() {
-    return [...new Set(state.data.shifts.map((s) => s.post).filter(Boolean))].sort();
+    return [...new Set([...state.data.shifts, ...state.data.series_posts].map((s) => s.post).filter(Boolean))].sort();
   }
   // Suggest the posts from a typical recent event (the fullest of the last 10).
   function lastEventPosts() {
     const recent = state.data.events.slice().sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at)).slice(0, 10);
     let best = [];
-    for (const e of recent) { const p = shiftsOf(e).map((s) => s.post).filter(Boolean); if (p.length > best.length) best = p; }
+    for (const e of recent) {
+      const p = shiftsOf(e).filter((s) => s.post).map((s) => ({ post: s.post, requires_ccw: !!s.requires_ccw }));
+      if (p.length > best.length) best = p;
+    }
     return best;
   }
 
+  // ---- Event create / edit (one-off or repeating, like a phone calendar) ----
+  const REPEAT_OPTIONS = [
+    ['none', 'Does not repeat'], ['daily', 'Every day'], ['weekly', 'Every week'], ['biweekly', 'Every 2 weeks'],
+    ['monthly_day', 'Every month (same date)'], ['monthly_nth', 'Every month (same weekday, e.g. 2nd Sunday)'],
+    ['monthly_last', 'Every month (last weekday, e.g. last Sunday)']
+  ];
+  function repeatValue(s) {
+    if (!s) return 'none';
+    if (s.freq === 'daily') return 'daily';
+    if (s.freq === 'weekly') return s.interval_n === 2 ? 'biweekly' : 'weekly';
+    return 'monthly_' + s.monthly_mode;
+  }
+  function repeatPayload(v, date) {
+    const map = {
+      none: { freq: 'none' }, daily: { freq: 'daily', interval_n: 1 }, weekly: { freq: 'weekly', interval_n: 1 },
+      biweekly: { freq: 'weekly', interval_n: 2 }, monthly_day: { freq: 'monthly', monthly_mode: 'day' },
+      monthly_nth: { freq: 'monthly', monthly_mode: 'nth' }, monthly_last: { freq: 'monthly', monthly_mode: 'last' }
+    };
+    const out = { ...map[v.repeat] };
+    if (out.freq === 'weekly') out.by_weekday = v.weekdays && v.weekdays.length ? v.weekdays : [dateOnly(date).getDay()];
+    return out;
+  }
+
   function editEvent(e) {
-    const isNew = !e;
-    const s = e ? new Date(e.starts_at) : null, en = e ? new Date(e.ends_at) : null;
+    if (!e) return eventForm({ mode: 'new' });
+    if (!e.series_id) return eventForm({ mode: 'oneoff', event: e });
+    chooseScope('Edit repeating event', 'Which events do you want to change?', (scope) => {
+      if (scope === 'one') eventForm({ mode: 'one', event: e });
+      else eventForm({ mode: scope, event: e, series: seriesOf(e) });
+    });
+  }
+
+  function chooseScope(title, question, cb) {
+    openDialog({
+      title,
+      body: [h('p', {}, question)],
+      buttons: (close) => [
+        h('button', { class: 'btn', onclick: () => { close(); cb('one'); } }, 'This event only'),
+        h('button', { class: 'btn', onclick: () => { close(); cb('future'); } }, 'This and following'),
+        h('button', { class: 'btn', onclick: () => { close(); cb('all'); } }, 'All events')
+      ]
+    });
+  }
+
+  function eventForm({ mode, event: e, series: s }) {
+    const isSeriesEdit = mode === 'future' || mode === 'all';
+    const start = e ? new Date(e.starts_at) : null, end = e ? new Date(e.ends_at) : null;
     const nextSunday = new Date(); nextSunday.setDate(nextSunday.getDate() + ((7 - nextSunday.getDay()) % 7 || 7));
+    const seriesPosts = s ? state.data.series_posts.filter((p) => p.series_id === s.id).sort((a, b) => a.sort_order - b.sort_order) : [];
+
+    let values;
+    if (mode === 'new') values = { date: ymd(nextSunday), start: '08:30', end: '10:30', repeat: 'none', weekdays: [0], posts: lastEventPosts() };
+    else if (isSeriesEdit) values = {
+      title: s.title, date: e.occurrence_date || ymd(start), start: s.start_time.slice(0, 5), end: s.end_time.slice(0, 5),
+      location: s.location, notes: s.notes, repeat: repeatValue(s), weekdays: s.by_weekday && s.by_weekday.length ? s.by_weekday : [dateOnly(s.starts_on).getDay()],
+      until: s.until || '', posts: seriesPosts.map((p) => ({ id: p.id, post: p.post, requires_ccw: p.requires_ccw, roster_id: p.roster_id }))
+    };
+    else values = { title: e.title, date: ymd(start), start: hm(start), end: hm(end), location: e.location, notes: e.notes, repeat: 'none', weekdays: [start.getDay()] };
+
+    const showRepeat = mode !== 'one';
+    const showPosts = mode === 'new' || isSeriesEdit;
+    const repeats = (v) => v.repeat && v.repeat !== 'none';
+    const fields = [
+      { name: 'title', label: 'Service / event', required: true, placeholder: 'e.g. Sunday Worship', list: [...new Set(state.data.events.map((x) => x.title))] },
+      ...(mode === 'all' ? [] : [{ name: 'date', label: mode === 'future' ? 'Date (changes start from here)' : 'Date', type: 'date', required: true }]),
+      { name: 'start', label: 'Security starts', type: 'time', required: true },
+      { name: 'end', label: 'Security ends', type: 'time', required: true, hint: 'An end time earlier than the start is treated as the next day.' },
+      { name: 'location', label: 'Location', placeholder: 'Campus or building' },
+      { name: 'notes', label: 'Notes for the team', type: 'textarea', rows: 3 },
+      ...(showRepeat ? [
+        { name: 'repeat', label: 'Repeat', type: 'select', options: isSeriesEdit ? REPEAT_OPTIONS.slice(1) : REPEAT_OPTIONS },
+        { name: 'weekdays', label: 'On these days', type: 'weekdays', visible: (v) => v.repeat === 'weekly' || v.repeat === 'biweekly' },
+        { name: 'until', label: 'End repeat (optional)', type: 'date', hint: 'Leave blank to keep repeating. Dates are filled in about 6 months ahead.', visible: repeats }
+      ] : []),
+      ...(showPosts ? [{
+        name: 'posts', label: 'Posts', type: 'posts',
+        hint: mode === 'new'
+          ? 'Each post can require a CCW-qualified person and have a default person. Repeating events copy these to every date.'
+          : 'Changes here apply to the dates you chose. Swaps and one-off changes on specific dates are kept.'
+      }] : [])
+    ];
+
+    const titles = { new: 'New event', oneoff: 'Edit event', one: 'Edit this event only', future: 'Edit this and following', all: 'Edit all events' };
+    const intro = mode === 'one' ? h('div', { class: 'notice' }, 'Changes apply only to this date. Future changes to the repeating event won\'t overwrite it.')
+      : mode === 'oneoff' ? h('p', { class: 'muted small' }, 'To edit posts, use the Edit buttons on the event card. Choose a Repeat option to turn this into a repeating event (its current posts become the template).')
+        : null;
+
     openForm({
-      title: isNew ? 'New event' : 'Edit event',
-      values: isNew
-        ? { date: ymd(nextSunday), start: '08:30', end: '10:30', posts: lastEventPosts().join('\n'), repeat: 0 }
-        : { title: e.title, date: ymd(s), start: hm(s), end: hm(en), location: e.location, notes: e.notes },
-      fields: [
-        { name: 'title', label: 'Service / event', required: true, placeholder: 'e.g. Sunday Worship', list: [...new Set(state.data.events.map((x) => x.title))] },
-        { name: 'date', label: 'Date', type: 'date', required: true },
-        { name: 'start', label: 'Security starts', type: 'time', required: true },
-        { name: 'end', label: 'Security ends', type: 'time', required: true, hint: 'An end time earlier than the start is treated as the next day.' },
-        { name: 'location', label: 'Location', placeholder: 'Campus or building' },
-        { name: 'notes', label: 'Notes for the team', type: 'textarea', rows: 3 },
-        ...(isNew ? [
-          { name: 'posts', label: 'Posts (one per line)', type: 'textarea', rows: 5, placeholder: 'Parking lot\nSanctuary\nChildren\'s wing', hint: 'Each post starts open. Assign people after saving, or let them volunteer.' },
-          { name: 'repeat', label: 'Also create it for the next … weeks', type: 'number', inputmode: 'numeric', hint: '0 = just this date. Up to 12.' }
-        ] : [])
-      ],
+      title: titles[mode],
+      intro,
+      values,
+      fields,
+      submitLabel: mode === 'new' ? 'Create' : 'Save',
       onSubmit: async (v) => {
-        const row = { title: v.title, starts_at: localIso(v.date, v.start), ends_at: endIso(v.date, v.start, v.end), location: v.location, notes: v.notes };
-        if (!isNew) { await saveRow('events', e.id, row); await afterSaveSchedule('Event saved'); return; }
-        const weeks = Math.max(0, Math.min(12, Math.floor(v.repeat || 0)));
-        const posts = (v.posts || '').split('\n').map((x) => x.trim()).filter(Boolean);
-        for (let w = 0; w <= weeks; w++) {
-          const shift = (iso) => { const d = new Date(iso); d.setDate(d.getDate() + 7 * w); return d.toISOString(); };
-          const { data, error } = await sb.from('events').insert({ ...row, starts_at: shift(row.starts_at), ends_at: shift(row.ends_at) }).select('id').single();
-          if (error) throw error;
-          if (posts.length) {
-            const { error: e2 } = await sb.from('shifts').insert(posts.map((p, i) => ({ event_id: data.id, post: p, sort_order: i })));
-            if (e2) throw e2;
-          }
+        if (showPosts) {
+          const posts = v.posts;
+          const bad = posts.filter((p) => p.requires_ccw && p.roster_id).map((p) => state.data.roster.find((r) => r.id === p.roster_id))
+            .filter((r) => r && !(r.ccw_qualified && (!r.ccw_expires_on || daysUntil(r.ccw_expires_on) >= 0)));
+          if (bad.length && !confirm(`${bad.map((r) => r.name).join(', ')} ${bad.length > 1 ? 'are' : 'is'} set as default for a CCW post but not CCW-qualified. Save anyway?`)) throw new Error('Change the default person for the CCW post, then save.');
         }
-        await afterSaveSchedule(weeks ? `Created ${weeks + 1} events` : 'Event created');
+        // One date of a series, or a plain event staying plain
+        if (mode === 'one' || (mode === 'oneoff' && v.repeat === 'none')) {
+          const row = { title: v.title, starts_at: localIso(v.date, v.start), ends_at: endIso(v.date, v.start, v.end), location: v.location, notes: v.notes };
+          if (mode === 'one') row.is_exception = true;
+          await saveRow('events', e.id, row);
+          await afterSaveSchedule('Event saved');
+          return;
+        }
+        const date = mode === 'all' ? s.starts_on : v.date;
+        const p = {
+          title: v.title, location: v.location, notes: v.notes, start_time: v.start, end_time: v.end,
+          starts_on: date, until: v.until || null, ...repeatPayload(v, date)
+        };
+        if (mode === 'new') p.posts = v.posts;
+        if (mode === 'oneoff') {
+          p.convert_event_id = e.id;
+          p.posts = shiftsOf(e).map((x) => ({ post: x.post, requires_ccw: !!x.requires_ccw, roster_id: x.roster_id }));
+        }
+        if (isSeriesEdit) { p.series_id = s.id; p.scope = mode; p.from_date = e.occurrence_date; p.posts = v.posts; }
+        if (p.until && p.until < date) throw new Error('The end-repeat date is before the start date.');
+        const { error } = await sb.rpc('save_event_series', { p });
+        if (error) throw error;
+        await afterSaveSchedule(mode === 'new' ? (p.freq === 'none' ? 'Event created' : 'Repeating event created') : 'Saved');
       },
-      onDelete: isNew ? null : async () => { await deleteRow('events', e.id); await afterSaveSchedule('Event deleted'); },
-      deleteConfirm: 'Delete this event and all of its posts? It will disappear from everyone\'s calendars.'
+      onDelete: mode === 'new' ? null : async () => {
+        const scope = mode === 'oneoff' ? 'one' : mode;
+        const { error } = await sb.rpc('delete_series_event', { p_event: e.id, p_scope: scope });
+        if (error) throw error;
+        await afterSaveSchedule('Deleted');
+      },
+      deleteConfirm: mode === 'one' ? 'Delete just this date? The rest of the repeating event stays.'
+        : mode === 'future' ? 'Delete this date and every later one? Earlier dates stay.'
+          : mode === 'all' ? 'Delete this repeating event? All upcoming dates are removed; past ones stay on record.'
+            : 'Delete this event and all of its posts? It will disappear from everyone\'s calendars.'
     });
   }
 
@@ -1299,13 +1523,14 @@
         { name: 'date', label: 'New date', type: 'date', required: true },
         { name: 'keep', label: 'Keep the same people assigned', type: 'checkbox' }
       ],
+      intro: h('p', { class: 'muted small' }, 'Tip: for services that happen regularly, use Edit event → Repeat instead.'),
       submitLabel: 'Duplicate',
       onSubmit: async (v) => {
         const delta = new Date(`${v.date}T${hm(s)}`) - s;
         const move = (iso) => iso ? new Date(new Date(iso).getTime() + delta).toISOString() : null;
         const { data, error } = await sb.from('events').insert({ title: e.title, starts_at: move(e.starts_at), ends_at: move(e.ends_at), location: e.location, notes: e.notes }).select('id').single();
         if (error) throw error;
-        const rows = shiftsOf(e).map((x) => ({ event_id: data.id, post: x.post, starts_at: move(x.starts_at), ends_at: move(x.ends_at), roster_id: v.keep ? x.roster_id : null, note: x.note, sort_order: x.sort_order }));
+        const rows = shiftsOf(e).map((x) => ({ event_id: data.id, post: x.post, requires_ccw: !!x.requires_ccw, starts_at: move(x.starts_at), ends_at: move(x.ends_at), roster_id: v.keep ? x.roster_id : null, note: x.note, sort_order: x.sort_order }));
         if (rows.length) { const { error: e2 } = await sb.from('shifts').insert(rows); if (e2) throw e2; }
         await afterSaveSchedule('Event duplicated');
       }
@@ -1316,12 +1541,15 @@
     const isNew = !s;
     s = s || {};
     const st = s.starts_at ? new Date(s.starts_at) : null, en = s.ends_at ? new Date(s.ends_at) : null;
+    const people = state.data.roster.filter((r) => r.active || r.id === s.roster_id);
     openForm({
       title: isNew ? `Add post — ${e.title}` : `Edit post — ${e.title}`,
-      values: { post: s.post || '', roster_id: s.roster_id || '', start: st ? hm(st) : '', end: en ? hm(en) : '', note: s.note || '', cover_requested: !!s.cover_requested, sort_order: s.sort_order || 0 },
+      intro: e.series_id ? h('p', { class: 'muted small' }, 'This changes the post for this date only. To change it on every date, use Edit event → This and following / All events.') : null,
+      values: { post: s.post || '', requires_ccw: !!s.requires_ccw, roster_id: s.roster_id || '', start: st ? hm(st) : '', end: en ? hm(en) : '', note: s.note || '', cover_requested: !!s.cover_requested, sort_order: s.sort_order || 0 },
       fields: [
         { name: 'post', label: 'Post', required: true, placeholder: 'e.g. Parking lot', list: knownPosts() },
-        { name: 'roster_id', label: 'Assigned to', type: 'select', options: [['', 'Open — needs a volunteer'], ...state.data.roster.filter((r) => r.active || r.id === s.roster_id).map((r) => [r.id, r.name])] },
+        { name: 'requires_ccw', label: 'CCW-qualified team member required', type: 'checkbox' },
+        { name: 'roster_id', label: 'Assigned to', type: 'select', options: [['', 'Open — needs a volunteer'], ...people.map((r) => [r.id, r.name + (ccwOkOn(r, e.starts_at) ? ' · CCW' : '')])] },
         { name: 'start', label: 'Start (optional)', type: 'time', hint: `Leave both times blank to use the event time (${timeRange(new Date(e.starts_at), new Date(e.ends_at))}).` },
         { name: 'end', label: 'End (optional)', type: 'time' },
         { name: 'note', label: 'Note', placeholder: 'e.g. Bring radio, meet at east door' },
@@ -1330,9 +1558,13 @@
       ],
       onSubmit: async (v) => {
         if (!!v.start !== !!v.end) throw new Error('Enter both a start and end time, or leave both blank.');
+        if (v.requires_ccw && v.roster_id) {
+          const r = state.data.roster.find((x) => x.id === v.roster_id);
+          if (!ccwOkOn(r, e.starts_at) && !confirm(`${r.name} isn't CCW-qualified on this date (missing or expired). Assign anyway?`)) throw new Error('Pick a CCW-qualified person or leave the post open.');
+        }
         const day = ymd(new Date(e.starts_at));
         const row = {
-          post: v.post, roster_id: v.roster_id || null, note: v.note, sort_order: v.sort_order,
+          post: v.post, requires_ccw: v.requires_ccw, roster_id: v.roster_id || null, note: v.note, sort_order: v.sort_order,
           starts_at: v.start ? localIso(day, v.start) : null,
           ends_at: v.start ? endIso(day, v.start, v.end) : null
         };
@@ -1341,12 +1573,13 @@
         await saveRow('shifts', s.id, row);
         await afterSaveSchedule('Post saved');
       },
-      onDelete: isNew ? null : async () => { await deleteRow('shifts', s.id); await afterSaveSchedule('Post removed'); }
+      onDelete: isNew ? null : async () => { await deleteRow('shifts', s.id); await afterSaveSchedule('Post removed'); },
+      deleteConfirm: e.series_id ? 'Remove this post from this date only?' : undefined
     });
   }
 
   async function afterSaveSchedule(msg) {
-    await Promise.all([refreshTable('events'), refreshTable('shifts')]);
+    await Promise.all(['events', 'shifts', 'event_series', 'series_posts'].map(refreshTable));
     render();
     if (msg) toast(msg);
   }
