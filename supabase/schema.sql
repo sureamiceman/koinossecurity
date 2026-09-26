@@ -57,6 +57,12 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function public.handle_new_user();
 
+-- Give anyone who signed up before this script ran a profile too.
+insert into public.profiles (id, email, full_name)
+select id, coalesce(email, ''), coalesce(raw_user_meta_data->>'full_name', '')
+from auth.users
+on conflict (id) do nothing;
+
 alter table public.profiles enable row level security;
 
 drop policy if exists "profiles_select" on public.profiles;
