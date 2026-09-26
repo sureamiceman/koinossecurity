@@ -1165,7 +1165,9 @@
     const f = state.sched;
     const me = myRoster();
     const person = f.filter === 'mine' ? (me && me.id) : f.person;
-    let events = state.data.events.filter((e) => f.filter === 'past' ? !isUpcoming(e) : isUpcoming(e));
+    // The month grid is a calendar: it shows past days too (except on the Past filter, which is past-only anyway).
+    const monthAll = f.view === 'month' && f.filter !== 'cover';
+    let events = state.data.events.filter((e) => monthAll ? true : f.filter === 'past' ? !isUpcoming(e) : isUpcoming(e));
     events.sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
     if (f.filter === 'past') events.reverse();
     const rows = [];
@@ -1481,7 +1483,7 @@
           const row = { title: v.title, starts_at: localIso(v.date, v.start), ends_at: endIso(v.date, v.start, v.end), location: v.location, notes: v.notes };
           if (mode === 'one') row.is_exception = true;
           await saveRow('events', e.id, row);
-          await afterSaveSchedule('Event saved');
+          await afterSaveSchedule('Event saved', row.ends_at);
           return;
         }
         const date = mode === 'all' ? s.starts_on : v.date;
@@ -1498,7 +1500,8 @@
         if (p.until && p.until < date) throw new Error('The end-repeat date is before the start date.');
         const { error } = await sb.rpc('save_event_series', { p });
         if (error) throw error;
-        await afterSaveSchedule(mode === 'new' ? (p.freq === 'none' ? 'Event created' : 'Repeating event created') : 'Saved');
+        await afterSaveSchedule(mode === 'new' ? (p.freq === 'none' ? 'Event created' : 'Repeating event created') : 'Saved',
+          p.freq === 'none' ? endIso(v.date, v.start, v.end) : null);
       },
       onDelete: mode === 'new' ? null : async () => {
         const scope = mode === 'oneoff' ? 'one' : mode;
@@ -1578,10 +1581,12 @@
     });
   }
 
-  async function afterSaveSchedule(msg) {
+  async function afterSaveSchedule(msg, endsAt) {
     await Promise.all(['events', 'shifts', 'event_series', 'series_posts'].map(refreshTable));
     render();
-    if (msg) toast(msg);
+    if (endsAt && new Date(endsAt).getTime() < Date.now() && state.sched.filter !== 'past' && state.sched.view !== 'month') {
+      toast(`${msg || 'Saved'} — it has already ended, so it's under Past`, 6000);
+    } else if (msg) toast(msg);
   }
 
   // ------------------------------------------------------------------
