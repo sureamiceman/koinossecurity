@@ -10,7 +10,9 @@ Progressive Web App (PWA) for the Koinos church security team. It installs on iP
 - **CCW posts**: a post can require a CCW-qualified person. Members without a current qualification (on that event's date) can't volunteer for or cover it; admins are warned before assigning someone who isn't qualified.
 - **Calendar subscriptions**: each person can create private links (their own posts, anyone's, or the whole team) that iPhone, Google and Outlook calendars subscribe to. Events read "Security Sunday Worship: 8:15–10:30 AM" and update when posts change.
 - **Team**: roster with photos, tap to call/text, Medical and CCW filters. CCW qualification with expiry date; admins are warned 30 days before it expires.
-- **Users**: approve sign-ups; superusers grant/revoke admin.
+- **Users**: approve sign-ups; superusers grant/revoke admin. Approving someone whose email matches a roster entry links them automatically.
+- **Your profile**: everyone can add their own phone number and photo. Until both are filled in, the app asks once each time it's opened or signed into ("Complete your profile"); it can be skipped and done later under *More → Edit profile*.
+- **Linking merges details**: when a roster entry is linked to an app account, the roster email is replaced with the sign-in email, and the person's own phone and photo fill in anything the roster entry is missing.
 
 Works offline with the last-loaded information (text only; photos need a connection).
 
@@ -19,7 +21,7 @@ Works offline with the last-loaded information (text only; photos need a connect
 | Role | Can do |
 |---|---|
 | Pending | Signed up, waiting for approval. Sees nothing. |
-| Member | View everything, call/text. |
+| Member | View everything, call/text; volunteer/cover posts; edit their own name, phone and photo. |
 | Admin | Member + add/edit/delete bulletins, SOPs, contacts and roster; approve or remove members. |
 | Superuser | Admin + grant/revoke admin. Superuser itself is only granted in the Supabase SQL editor. |
 

@@ -146,6 +146,19 @@ begin
   end if;
 
   update public.profiles set role = new_role where id = target;
+
+  -- On approval, link the matching roster entry (same email, not linked yet).
+  -- The roster trigger then merges the account's details into it.
+  if cur_role = 'pending' and new_role <> 'pending'
+     and to_regclass('public.roster') is not null
+     and not exists (select 1 from public.roster where profile_id = target) then
+    update public.roster r
+       set profile_id = target
+     where r.id = (select r2.id from public.roster r2 join public.profiles p on p.id = target
+                    where r2.profile_id is null and r2.email <> ''
+                      and lower(r2.email) = lower(p.email)
+                    order by r2.active desc, r2.created_at limit 1);
+  end if;
 end $$;
 
 revoke all on function public.set_user_role(uuid, text) from public, anon;
@@ -303,6 +316,79 @@ create or replace function public.my_roster_id() returns uuid
 language sql stable security definer set search_path = public as $$
   select id from public.roster where profile_id = auth.uid() and active order by created_at limit 1
 $$;
+
+-- ---------------------------------------------------------------------
+-- Self-service profile: each person can add their own phone and photo.
+-- Kept on their account, and copied onto their roster entry when linked.
+-- ---------------------------------------------------------------------
+alter table public.profiles add column if not exists phone text not null default '';
+alter table public.profiles add column if not exists photo_path text;
+
+-- When a roster entry gets linked to an app account, merge the account in:
+-- the sign-in email always wins; phone and photo fill in only if blank.
+create or replace function public.roster_merge_profile() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare p record;
+begin
+  if new.profile_id is not null
+     and (tg_op = 'INSERT' or new.profile_id is distinct from old.profile_id) then
+    select email, phone, photo_path into p from public.profiles where id = new.profile_id;
+    if found then
+      if coalesce(p.email, '') <> '' then new.email := p.email; end if;
+      if coalesce(new.phone, '') = '' and coalesce(p.phone, '') <> '' then new.phone := p.phone; end if;
+      if new.photo_path is null and p.photo_path is not null then new.photo_path := p.photo_path; end if;
+    end if;
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists roster_merge_profile on public.roster;
+create trigger roster_merge_profile before insert or update of profile_id on public.roster
+  for each row execute function public.roster_merge_profile();
+
+-- Entries linked before this existed: bring their email in line with the sign-in.
+update public.roster r set email = p.email
+  from public.profiles p
+ where p.id = r.profile_id and coalesce(p.email, '') <> '' and r.email is distinct from p.email;
+
+-- Update my own phone and/or photo (and my roster entry, if linked).
+-- p_set_photo = false leaves the photo alone; true sets it (null removes it).
+-- Returns the previous photo path so the app can clean up the old file.
+create or replace function public.update_my_profile(p_phone text, p_set_photo boolean, p_photo_path text)
+returns text
+language plpgsql security definer set search_path = public as $$
+declare
+  me       uuid := public.my_roster_id();
+  old_path text;
+begin
+  if not public.is_member() then raise exception 'Not authorized'; end if;
+  if p_set_photo and p_photo_path is not null
+     and p_photo_path not like 'self/' || auth.uid()::text || '/%' then
+    raise exception 'Invalid photo';
+  end if;
+  if me is not null then
+    select photo_path into old_path from public.roster where id = me;
+  else
+    select photo_path into old_path from public.profiles where id = auth.uid();
+  end if;
+
+  update public.profiles
+     set phone = coalesce(left(trim(p_phone), 40), phone),
+         photo_path = case when p_set_photo then p_photo_path else photo_path end
+   where id = auth.uid();
+
+  if me is not null then
+    update public.roster
+       set phone = coalesce(left(trim(p_phone), 40), phone),
+           photo_path = case when p_set_photo then p_photo_path else photo_path end
+     where id = me;
+  end if;
+
+  return case when p_set_photo and old_path is distinct from p_photo_path then old_path end;
+end $$;
+
+revoke all on function public.update_my_profile(text, boolean, text) from public, anon;
+grant execute on function public.update_my_profile(text, boolean, text) to authenticated;
 
 -- ---------------------------------------------------------------------
 -- Schedule: events (services) with posts/shifts assigned to roster people
@@ -974,6 +1060,18 @@ create policy "photos_update" on storage.objects for update to authenticated
   using (bucket_id = 'photos' and public.is_admin());
 create policy "photos_delete" on storage.objects for delete to authenticated
   using (bucket_id = 'photos' and public.is_admin());
+
+-- Members may upload and remove their own profile photo under self/<their id>/.
+drop policy if exists "photos_self_insert" on storage.objects;
+drop policy if exists "photos_self_delete" on storage.objects;
+create policy "photos_self_insert" on storage.objects for insert to authenticated
+  with check (bucket_id = 'photos' and public.is_member()
+              and (storage.foldername(name))[1] = 'self'
+              and (storage.foldername(name))[2] = auth.uid()::text);
+create policy "photos_self_delete" on storage.objects for delete to authenticated
+  using (bucket_id = 'photos' and public.is_member()
+         and (storage.foldername(name))[1] = 'self'
+         and (storage.foldername(name))[2] = auth.uid()::text);
 
 -- ---------------------------------------------------------------------
 -- Live updates: push bulletin and schedule changes to open apps immediately

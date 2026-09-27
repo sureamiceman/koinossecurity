@@ -199,7 +199,7 @@
 
   async function resolvePhotos() {
     if (Date.now() - state.photoUrlsAt > 6 * 3600 * 1000) { state.photoUrls = {}; state.photoUrlsAt = Date.now(); }
-    const paths = [...new Set([...state.data.bulletins, ...state.data.roster]
+    const paths = [...new Set([...state.data.bulletins, ...state.data.roster, ...state.data.profiles, state.profile || {}]
       .map((r) => r.photo_path).filter((p) => p && !state.photoUrls[p]))];
     if (!paths.length) return;
     const { data, error } = await sb.storage.from('photos').createSignedUrls(paths, 12 * 3600);
@@ -312,7 +312,7 @@
   // Generic form dialog. Field types: text (default), textarea, select, checkbox,
   // number, date, time, tel, email, password, photo, weekdays, posts.
   // A field may have visible(values) to show/hide it as other fields change.
-  function openForm({ title, fields, values = {}, submitLabel = 'Save', onSubmit, onDelete, deleteLabel = 'Delete', deleteConfirm, intro }) {
+  function openForm({ title, fields, values = {}, submitLabel = 'Save', cancelLabel = 'Cancel', onSubmit, onDelete, deleteLabel = 'Delete', deleteConfirm, intro }) {
     const dlg = h('dialog', {});
     const getters = {};
     const wraps = {};
@@ -413,7 +413,7 @@
         }
       }, deleteLabel) : null,
       h('div', { class: 'spacer' }),
-      h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
+      h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, cancelLabel),
       saveBtn);
 
     const form = h('form', {
@@ -672,6 +672,7 @@
       render();
       await refreshAll();
       subscribe();
+      maybePromptProfile();
     } else {
       render();
     }
@@ -684,6 +685,7 @@
     state.session = null;
     state.profile = null;
     state.profileError = null;
+    state.profilePrompted = false;
     state.data = emptyData();
     state.photoUrls = {};
     history.replaceState(null, '', '/');
@@ -1680,8 +1682,10 @@
           h('div', { class: 'grow' },
             h('div', { class: 'title' }, h('strong', {}, p.full_name)),
             h('div', { class: 'muted small' }, p.email),
+            myContact().phone ? h('div', { class: 'muted small' }, myContact().phone) : null,
             h('span', { class: 'badge' + (isAdmin() ? ' bolo' : '') }, ROLE_LABELS[p.role])),
-          h('button', { class: 'btn small', onclick: editMyName }, 'Edit name')))
+          h('button', { class: 'btn small', onclick: () => editMyProfile() }, 'Edit profile')),
+        profileIncomplete() ? h('p', { class: 'hint' }, 'Add your ' + missingParts().join(' and ') + ' so the team can reach and recognize you.') : null)
     ];
 
     if (isAdmin()) {
@@ -1730,17 +1734,67 @@
     });
   }
 
-  function editMyName() {
+  // My phone and photo live on my roster entry once I'm linked, on my account until then.
+  function myContact() {
+    const r = myRoster();
+    const p = state.profile || {};
+    return r ? { phone: r.phone || '', photo_path: r.photo_path || null }
+      : { phone: p.phone || '', photo_path: p.photo_path || null };
+  }
+  const profileFeature = () => !!state.profile && 'phone' in state.profile; // database updated?
+  function missingParts() {
+    const c = myContact();
+    return [!c.phone && 'phone number', !c.photo_path && 'photo'].filter(Boolean);
+  }
+  const profileIncomplete = () => isMember() && profileFeature() && missingParts().length > 0;
+
+  // Once per app launch or sign-in, until the profile is complete. Skippable.
+  function maybePromptProfile() {
+    if (state.profilePrompted || !profileIncomplete() || document.querySelector('dialog[open]')) return;
+    state.profilePrompted = true;
+    editMyProfile({ prompt: true });
+  }
+
+  function editMyProfile({ prompt = false } = {}) {
+    const c = myContact();
+    const canPhoto = profileFeature();
     openForm({
-      title: 'Your name',
-      values: { full_name: state.profile.full_name },
-      fields: [{ name: 'full_name', label: 'Name', required: true, autocomplete: 'name' }],
-      onSubmit: async (v) => {
-        const { error } = await sb.rpc('update_my_name', { new_name: v.full_name });
-        if (error) throw error;
-        state.profile.full_name = v.full_name;
+      title: prompt ? 'Complete your profile' : 'Your profile',
+      intro: prompt ? h('p', { class: 'body-text dlg-intro' }, 'Add your phone number and a photo so the team can reach you and recognize you. You can skip this for now and do it later under More → Edit profile.') : null,
+      submitLabel: 'Save',
+      cancelLabel: prompt ? 'Skip for now' : 'Cancel',
+      values: { full_name: state.profile.full_name, phone: c.phone },
+      fields: [
+        { name: 'full_name', label: 'Name', required: true, autocomplete: 'name' },
+        canPhoto ? { name: 'phone', label: 'Phone', type: 'tel', inputmode: 'tel', autocomplete: 'tel', placeholder: '(555) 555-5555' } : null,
+        canPhoto ? { name: 'photo', label: 'Photo', type: 'photo', currentUrl: c.photo_path ? state.photoUrls[c.photo_path] : null, hint: 'A clear photo of your face works best.' } : null
+      ].filter(Boolean),
+      onSubmit: async (v, photo) => {
+        if (v.full_name !== state.profile.full_name) {
+          const { error } = await sb.rpc('update_my_name', { new_name: v.full_name });
+          if (error) throw error;
+          state.profile.full_name = v.full_name;
+        }
+        if (canPhoto) {
+          let newPath = null;
+          const setPhoto = !!(photo.file || photo.remove);
+          if (photo.file) {
+            const blob = await resizeImage(photo.file, 800);
+            newPath = `self/${state.profile.id}/${crypto.randomUUID()}.jpg`;
+            const { error } = await sb.storage.from('photos').upload(newPath, blob, { contentType: 'image/jpeg', upsert: false });
+            if (error) throw error;
+          }
+          const { data: oldPath, error } = await sb.rpc('update_my_profile', { p_phone: v.phone || '', p_set_photo: setPhoto, p_photo_path: newPath });
+          if (error) { removePhoto(newPath); throw error; }
+          removePhoto(oldPath);
+          state.profile.phone = v.phone || '';
+          if (setPhoto) state.profile.photo_path = newPath;
+        }
         cacheSet('profile', state.profile);
-        await afterSave('profiles', 'Name updated');
+        await Promise.all([refreshTable('roster'), refreshTable('profiles')]);
+        await resolvePhotos();
+        render();
+        toast(profileIncomplete() ? 'Saved' : 'Profile complete — thanks!');
       }
     });
   }

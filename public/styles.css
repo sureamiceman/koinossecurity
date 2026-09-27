@@ -342,3 +342,5 @@ input:focus, select:focus, textarea:focus, .btn:focus-visible, .chip:focus-visib
 .avatar.open { background: transparent; color: var(--muted); border: 2px dashed var(--border); box-shadow: none; cursor: default; }
 .shift-person { gap: 8px; margin-top: 4px; }
 .person-name { font-weight: 600; }
+
+.dlg-intro { margin: 0 0 14px; }
