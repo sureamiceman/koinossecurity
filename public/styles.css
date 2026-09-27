@@ -197,12 +197,6 @@ a.list-item .sub { white-space: nowrap; }
 .list-item .badge { flex: none; }
 .list-item .phones { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
 
-.emergency-911 {
-  display: flex; align-items: center; justify-content: center; gap: 10px;
-  background: var(--urgent); color: #fff; text-decoration: none; font-weight: 800; font-size: 1.15rem;
-  border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
-}
-.emergency-911 svg { width: 24px; height: 24px; }
 
 .sop-detail h2 { font-size: 1.3rem; margin-bottom: 4px; }
 .sop-detail .body-text { font-size: 1.02rem; line-height: 1.6; margin-top: 14px; }
@@ -344,3 +338,4 @@ input:focus, select:focus, textarea:focus, .btn:focus-visible, .chip:focus-visib
 .person-name { font-weight: 600; }
 
 .dlg-intro { margin: 0 0 14px; }
+.team-contact .plain { background: none; border: 0; padding: 0; text-align: left; color: inherit; font: inherit; cursor: pointer; min-width: 0; }

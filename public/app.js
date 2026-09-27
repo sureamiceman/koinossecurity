@@ -943,10 +943,12 @@
   // ------------------------------------------------------------------
   const callBtn = (phone, alt) => h('a', { class: 'call-btn' + (alt ? ' alt' : ''), href: telHref(phone) }, icon('phone'), alt ? 'Alt' : 'Call');
 
+  // Contacts = everyone on the active team roster (automatic) + other contacts admins add.
   function contactsView() {
-    const content = [h('a', { class: 'emergency-911', href: 'tel:911' }, icon('phone'), 'Call 911')];
+    const content = [];
+    const team = state.data.roster.filter((r) => r.active);
     const rows = state.data.contacts;
-    if (!rows.length) content.push(empty('No contacts yet', 'phone'));
+    if (!rows.length && !team.length) content.push(empty('No contacts yet', 'phone'));
     for (const [cat, items] of groupBy(rows, 'category')) {
       content.push(h('div', { class: 'section-title' }, cat));
       content.push(h('div', { class: 'list' }, items.map((c) =>
@@ -961,6 +963,19 @@
             c.phone ? callBtn(c.phone) : null,
             c.alt_phone ? callBtn(c.alt_phone, true) : null)))));
     }
+    if (team.length) {
+      content.push(h('div', { class: 'section-title' }, `Security team (${team.length})`));
+      content.push(h('div', { class: 'list' }, team.map((r) =>
+        h('div', { class: 'list-item team-contact' },
+          avatar(r),
+          h('button', { type: 'button', class: 'grow plain', onclick: () => openPerson(r) },
+            h('div', { class: 'title' }, r.name,
+              r.is_medical ? h('span', { class: 'badge medical inline' }, 'Medical') : null),
+            r.position ? h('div', { class: 'sub' }, r.position) : null,
+            h('div', { class: 'sub' }, r.phone || 'No phone listed')),
+          h('div', { class: 'phones' }, r.phone ? callBtn(r.phone) : null)))));
+      if (isAdmin()) content.push(h('p', { class: 'muted small' }, 'Team members come from the Team roster automatically. Edit them under Team.'));
+    }
     return { title: 'Contacts', action: isAdmin() ? topAction('+ New', () => editContact()) : null, content };
   }
 
@@ -973,7 +988,7 @@
       fields: [
         { name: 'name', label: 'Name', required: true, placeholder: 'e.g. Police (non-emergency)' },
         { name: 'organization', label: 'Organization / role' },
-        { name: 'category', label: 'Category', required: true, default: 'General', list: categoriesOf(state.data.contacts), hint: 'e.g. Emergency services, Church staff, Utilities' },
+        { name: 'category', label: 'Category', required: true, default: 'General', list: categoriesOf(state.data.contacts), hint: 'e.g. Emergency services, Church staff, Utilities. Security team members are listed automatically from the roster, so there is no need to add them here.' },
         { name: 'phone', label: 'Phone', type: 'tel', autocomplete: 'tel', inputmode: 'tel' },
         { name: 'alt_phone', label: 'Alternate phone', type: 'tel', inputmode: 'tel' },
         { name: 'notes', label: 'Notes', type: 'textarea', rows: 3 },
