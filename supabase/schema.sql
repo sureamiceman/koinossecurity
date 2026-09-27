@@ -478,6 +478,29 @@ create table if not exists public.series_posts (
 );
 create index if not exists series_posts_series_idx on public.series_posts(series_id);
 
+-- Week-of-month rotation ("Update assignments"): for a repeating service,
+-- who fills each post on the 1st, 2nd, 3rd, 4th and 5th week of the month.
+-- When a series uses the rotation it replaces the post's single default person.
+alter table public.event_series add column if not exists use_rotation boolean not null default false;
+create table if not exists public.rotation_slots (
+  series_post_id  uuid not null references public.series_posts(id) on delete cascade,
+  week_of_month   int  not null check (week_of_month between 1 and 5),
+  roster_id       uuid references public.roster(id) on delete set null,   -- blank = open
+  primary key (series_post_id, week_of_month)
+);
+
+-- Who a template post should go to on a given date.
+create or replace function public.template_roster(p_post uuid, p_default uuid, d date) returns uuid
+language sql stable security definer set search_path = public as $$
+  select case when s.use_rotation
+              then (select rs.roster_id from public.rotation_slots rs
+                     where rs.series_post_id = p_post
+                       and rs.week_of_month = ceil(extract(day from d) / 7.0)::int)
+              else p_default end
+    from public.series_posts sp join public.event_series s on s.id = sp.series_id
+   where sp.id = p_post
+$$;
+
 alter table public.events add column if not exists series_id uuid references public.event_series(id) on delete set null;
 alter table public.events add column if not exists occurrence_date date;
 alter table public.events add column if not exists is_exception boolean not null default false;
@@ -599,14 +622,15 @@ begin
      and e.occurrence_date >= p_from and not e.is_exception and not sh.custom;
 
   update public.shifts sh
-     set roster_id = sp.roster_id
+     set roster_id = public.template_roster(sp.id, sp.roster_id, e.occurrence_date)
     from public.series_posts sp, public.events e
    where sh.series_post_id = sp.id and sp.series_id = s.id and e.id = sh.event_id
      and e.occurrence_date >= p_from and not e.is_exception
-     and sh.assignee_from_template and sh.roster_id is distinct from sp.roster_id;
+     and sh.assignee_from_template
+     and sh.roster_id is distinct from public.template_roster(sp.id, sp.roster_id, e.occurrence_date);
 
   insert into public.shifts (event_id, post, requires_ccw, roster_id, assignee_from_template, series_post_id, note, sort_order, starts_at, ends_at)
-  select e.id, sp.post, sp.requires_ccw, sp.roster_id, true, sp.id, sp.note, sp.sort_order,
+  select e.id, sp.post, sp.requires_ccw, public.template_roster(sp.id, sp.roster_id, e.occurrence_date), true, sp.id, sp.note, sp.sort_order,
          case when sp.start_time is null then null else public.local_ts(e.occurrence_date, sp.start_time, s.time_zone) end,
          case when sp.start_time is null then null else public.local_end_ts(e.occurrence_date, sp.start_time, coalesce(sp.end_time, s.end_time), s.time_zone) end
     from public.events e
@@ -646,7 +670,7 @@ begin
               s.location, s.notes, s.id, d)
       returning id into ev;
       insert into public.shifts (event_id, post, requires_ccw, roster_id, assignee_from_template, series_post_id, note, sort_order, starts_at, ends_at)
-      select ev, sp.post, sp.requires_ccw, sp.roster_id, true, sp.id, sp.note, sp.sort_order,
+      select ev, sp.post, sp.requires_ccw, public.template_roster(sp.id, sp.roster_id, d), true, sp.id, sp.note, sp.sort_order,
              case when sp.start_time is null then null else public.local_ts(d, sp.start_time, s.time_zone) end,
              case when sp.start_time is null then null else public.local_end_ts(d, sp.start_time, coalesce(sp.end_time, s.end_time), s.time_zone) end
         from public.series_posts sp where sp.series_id = s.id;
@@ -759,6 +783,13 @@ begin
         from public.events e
        where e.id = sh.event_id and e.series_id = new_id and id_map ? sh.series_post_id::text;
       perform set_config('koinos.template', '', true);
+      -- Carry the week-of-month rotation over to the new series.
+      update public.event_series set use_rotation = cur.use_rotation where id = new_id;
+      insert into public.rotation_slots (series_post_id, week_of_month, roster_id)
+      select (id_map->>rs.series_post_id::text)::uuid, rs.week_of_month, rs.roster_id
+        from public.rotation_slots rs
+       where id_map ? rs.series_post_id::text
+      on conflict do nothing;
       perform public.apply_series(new_id, d_from, added);
       perform public.materialize_series(new_id, d_from, true);
     else
@@ -817,6 +848,93 @@ begin
   perform public.materialize_series(sid, apply_from, true);
   return sid;
 end $$;
+
+-- Save the week-of-month rotation and fill the schedule from it (~6 months ahead).
+--   p.series   [{series_id, slots: [{series_post_id, week, roster_id}]}]
+--   p.replace_changes  true = also overwrite swaps, covers, volunteers and one-off edits
+-- Returns {updated, kept, sundays}.
+create or replace function public.save_rotation(p jsonb) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  sj       jsonb;
+  sl       jsonb;
+  sid      uuid;
+  v_replace boolean := coalesce((p->>'replace_changes')::boolean, false);
+  sids     uuid[] := '{}';
+  n_upd    int := 0;
+  n_kept   int := 0;
+  n_days   int := 0;
+begin
+  if not public.is_admin() then raise exception 'Only admins can change the schedule'; end if;
+
+  for sj in select * from jsonb_array_elements(coalesce(p->'series', '[]')) loop
+    sid := (sj->>'series_id')::uuid;
+    if not exists (select 1 from public.event_series where id = sid) then
+      raise exception 'Repeating service not found';
+    end if;
+    sids := sids || sid;
+    update public.event_series set use_rotation = true where id = sid;
+    for sl in select * from jsonb_array_elements(coalesce(sj->'slots', '[]')) loop
+      if not exists (select 1 from public.series_posts where id = (sl->>'series_post_id')::uuid and series_id = sid) then
+        continue;  -- post was removed meanwhile
+      end if;
+      insert into public.rotation_slots (series_post_id, week_of_month, roster_id)
+      values ((sl->>'series_post_id')::uuid, (sl->>'week')::int, nullif(sl->>'roster_id', '')::uuid)
+      on conflict (series_post_id, week_of_month) do update set roster_id = excluded.roster_id;
+    end loop;
+  end loop;
+
+  -- Make sure the next ~6 months of dates exist.
+  foreach sid in array sids loop
+    perform public.materialize_series(sid, current_date, false);
+  end loop;
+
+  -- Count what will change (and what is kept) before applying.
+  select count(*) filter (where sh.assignee_from_template or v_replace),
+         count(*) filter (where not sh.assignee_from_template and not v_replace)
+    into n_upd, n_kept
+    from public.shifts sh
+    join public.events e on e.id = sh.event_id
+    join public.series_posts sp on sp.id = sh.series_post_id
+   where e.series_id = any(sids) and e.occurrence_date >= current_date and not e.is_exception
+     and sh.roster_id is distinct from public.template_roster(sp.id, sp.roster_id, e.occurrence_date);
+
+  if v_replace then
+    perform set_config('koinos.template', 'on', true);
+    update public.shifts sh set assignee_from_template = true, cover_requested = false
+      from public.events e
+     where e.id = sh.event_id and e.series_id = any(sids) and e.occurrence_date >= current_date
+       and not e.is_exception and sh.series_post_id is not null;
+    perform set_config('koinos.template', '', true);
+  end if;
+
+  foreach sid in array sids loop
+    perform public.apply_series(sid, current_date, '{}');
+  end loop;
+
+  select count(distinct e.occurrence_date) into n_days
+    from public.events e where e.series_id = any(sids) and e.occurrence_date >= current_date;
+
+  return jsonb_build_object('updated', n_upd, 'kept', n_kept, 'sundays', n_days);
+end $$;
+
+-- Stop using the rotation for a service (its posts go back to their default person).
+create or replace function public.clear_rotation(p_series uuid) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_admin() then raise exception 'Only admins can change the schedule'; end if;
+  update public.event_series set use_rotation = false where id = p_series;
+  delete from public.rotation_slots rs using public.series_posts sp
+   where sp.id = rs.series_post_id and sp.series_id = p_series;
+  perform public.apply_series(p_series, current_date, '{}');
+end $$;
+
+revoke all on function public.template_roster(uuid, uuid, date) from public, anon;
+revoke all on function public.save_rotation(jsonb) from public, anon;
+revoke all on function public.clear_rotation(uuid) from public, anon;
+grant execute on function public.template_roster(uuid, uuid, date) to authenticated;
+grant execute on function public.save_rotation(jsonb) to authenticated;
+grant execute on function public.clear_rotation(uuid) to authenticated;
 
 -- Delete one event of a series, this and following, or the whole series
 -- (past events stay on record when deleting "all").
@@ -1019,7 +1137,7 @@ grant execute on function public.calendar_feed(text) to anon, authenticated;
 do $$
 declare t text;
 begin
-  foreach t in array array['sops','contacts','bulletins','roster','events','shifts','event_series','series_posts'] loop
+  foreach t in array array['sops','contacts','bulletins','roster','events','shifts','event_series','series_posts','rotation_slots'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('drop policy if exists %I on public.%I', t || '_select', t);
     execute format('drop policy if exists %I on public.%I', t || '_insert', t);

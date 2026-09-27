@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [] });
   const state = {
     session: null,
     profile: null,
@@ -166,7 +166,8 @@
     shifts: (t) => t.select('*, events!inner(ends_at)').gte('events.ends_at', since()).order('sort_order'),
     calendar_feeds: (t) => t.select('*').order('created_at'),
     event_series: (t) => t.select('*'),
-    series_posts: (t) => t.select('*').order('sort_order')
+    series_posts: (t) => t.select('*').order('sort_order'),
+    rotation_slots: (t) => t.select('*')
   };
 
   function loadCachedData() {
@@ -220,9 +221,9 @@
           if (navigator.vibrate && b.priority === 'urgent') navigator.vibrate([200, 100, 200]);
         }
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'shifts' }, async (payload) => {
-        await refreshTable('shifts');
-        render();
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shifts' }, (payload) => {
+        clearTimeout(state.shiftsTimer);
+        state.shiftsTimer = setTimeout(async () => { await refreshTable('shifts'); render(); }, 400);
         const n = payload.new || {};
         const me = myRoster();
         if (n.cover_requested && /asked for cover$/.test(n.last_change || '') && (!me || n.roster_id !== me.id)) {
@@ -230,9 +231,9 @@
           toast(`Cover needed: ${n.post || 'a post'}${e ? ' – ' + e.title : ''}`, 5000);
         }
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, async () => {
-        await Promise.all([refreshTable('events'), refreshTable('shifts')]);
-        render();
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => {
+        clearTimeout(state.eventsTimer);
+        state.eventsTimer = setTimeout(async () => { await Promise.all([refreshTable('events'), refreshTable('shifts')]); render(); }, 400);
       })
       .subscribe();
   }
@@ -715,10 +716,10 @@
 
   function mainView() {
     let [tab, id] = route();
-    if (tab === 'users' && !isAdmin()) tab = 'more';
-    const views = { alerts: alertsView, schedule: scheduleView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView };
+    if ((tab === 'users' || tab === 'assignments') && !isAdmin()) tab = 'more';
+    const views = { alerts: alertsView, schedule: scheduleView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView, assignments: assignmentsView };
     const v = (views[tab] || alertsView)(id);
-    const activeTab = tab === 'users' ? 'more' : (views[tab] ? tab : 'alerts');
+    const activeTab = tab === 'users' ? 'more' : tab === 'assignments' ? 'schedule' : (views[tab] ? tab : 'alerts');
 
     if (activeTab === 'alerts') {
       state.lastSeenAlerts = Date.now();
@@ -1219,6 +1220,7 @@
         h('button', { class: f.view === 'list' ? 'on' : '', onclick: () => { f.view = 'list'; render(); } }, 'List'),
         h('button', { class: f.view === 'month' ? 'on' : '', onclick: () => { f.view = 'month'; render(); } }, 'Month')),
       h('button', { class: 'btn small', onclick: openFeeds }, icon('calendar'), 'Subscribe')));
+    if (isAdmin()) content.push(h('a', { class: 'btn block assign-link', href: '#/assignments' }, 'Update assignments (Sunday rotation)'));
 
     if (f.filter === 'mine' && !me) {
       content.push(h('div', { class: 'notice' }, 'Your sign-in is not linked to your name on the team roster yet, so the app can\'t show "My assignments". Ask an admin to open Team → your name → Edit and choose your account under "App account".'));
@@ -1486,7 +1488,8 @@
     ];
 
     const titles = { new: 'New event', oneoff: 'Edit event', one: 'Edit this event only', future: 'Edit this and following', all: 'Edit all events' };
-    const intro = mode === 'one' ? h('div', { class: 'notice' }, 'Changes apply only to this date. Future changes to the repeating event won\'t overwrite it.')
+    const intro = isSeriesEdit && s && s.use_rotation ? h('div', { class: 'notice' }, 'People for this service come from Update assignments (by week of the month), so the default person on each post is not used. New posts added here will show up there to fill in.')
+      : mode === 'one' ? h('div', { class: 'notice' }, 'Changes apply only to this date. Future changes to the repeating event won\'t overwrite it.')
       : mode === 'oneoff' ? h('p', { class: 'muted small' }, 'To edit posts, use the Edit buttons on the event card. Choose a Repeat option to turn this into a repeating event (its current posts become the template).')
         : null;
 
@@ -1684,6 +1687,216 @@
   }
 
   // ------------------------------------------------------------------
+  // Update assignments: Sunday rotation by week of the month
+  // ------------------------------------------------------------------
+  const WEEK_LABELS = ['1st', '2nd', '3rd', '4th', '5th'];
+  const weekOfMonth = (d) => Math.ceil(d.getDate() / 7);
+  const onSunday = (s) => (s.by_weekday && s.by_weekday.length ? s.by_weekday : [dateOnly(s.starts_on).getDay()]).includes(0);
+  // One entry per service name. A service edited "this and following" is two series
+  // (before/after the change); both get the same grid, matched by post name.
+  function sundayServices() {
+    const today = ymd(new Date());
+    const groups = new Map();
+    state.data.event_series
+      .filter((s) => s.freq === 'weekly' && s.interval_n === 1 && onSunday(s) && (!s.until || s.until >= today))
+      .sort((a, b) => a.starts_on.localeCompare(b.starts_on))
+      .forEach((s) => {
+        const g = groups.get(s.title) || { title: s.title, series: [] };
+        g.series.push(s);
+        g.main = s; // the latest one defines the posts and time
+        groups.set(s.title, g);
+      });
+    return [...groups.values()].map((g) => ({ ...g, id: g.main.id, start_time: g.main.start_time, use_rotation: g.series.some((x) => x.use_rotation) }))
+      .sort((a, b) => a.start_time.localeCompare(b.start_time) || a.title.localeCompare(b.title));
+  }
+  const postsOfSeries = (sid) => state.data.series_posts.filter((p) => p.series_id === sid).sort((a, b) => a.sort_order - b.sort_order);
+  // Grid cells are keyed by post id of the service's latest series.
+  const slotKey = (postId, week) => postId + ':' + week;
+
+  // Working copy of the grid, kept across re-renders until applied or reset.
+  function assignDraft(services) {
+    const a = state.assign || (state.assign = { draft: {}, dirty: false, replace: false, result: null });
+    for (const s of services) for (const p of postsOfSeries(s.id)) for (let w = 1; w <= 5; w++) {
+      const k = slotKey(p.id, w);
+      if (k in a.draft) continue;
+      const slot = state.data.rotation_slots.find((r) => r.series_post_id === p.id && r.week_of_month === w);
+      a.draft[k] = s.use_rotation ? (slot && slot.roster_id) || '' : p.roster_id || '';
+    }
+    return a;
+  }
+
+  // Upcoming Sundays in the next ~6 months that are the Nth Sunday of their month.
+  function sundaysForWeek(w) {
+    const out = [];
+    const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + ((7 - d.getDay()) % 7));
+    const end = new Date(); end.setDate(end.getDate() + 182);
+    for (; d <= end; d.setDate(d.getDate() + 7)) if (weekOfMonth(d) === w) out.push(new Date(d));
+    return out;
+  }
+  const shortDate = (d) => d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const svcLabel = (s) => { const t = new Date(`2000-01-01T${s.start_time}`); return `${s.title} · ${fmtTime(t)}`; };
+
+  function assignmentsView() {
+    const services = sundayServices();
+    const content = [];
+    if (!services.length) {
+      content.push(h('div', { class: 'card' },
+        h('p', { class: 'body-text' }, 'This fills Sunday posts from a rotation: who serves each post on the 1st, 2nd, 3rd, 4th and 5th Sunday of the month, for each service.'),
+        h('p', { class: 'body-text' }, 'It needs your Sunday services set up as events that repeat every week. None were found yet.'),
+        h('button', { class: 'btn primary block', onclick: setupSundayServices }, 'Set up Sunday services')));
+      return { title: 'Update assignments', back: '#/schedule', content };
+    }
+
+    const a = assignDraft(services);
+    const people = state.data.roster.filter((r) => r.active);
+    const byId = (id) => state.data.roster.find((r) => r.id === id);
+    const ccwOkForever = (r) => r && r.ccw_qualified && (!r.ccw_expires_on || daysUntil(r.ccw_expires_on) >= 0);
+
+    content.push(h('p', { class: 'muted small' },
+      'Pick who serves each post by week of the month, then apply. Every matching Sunday in the next 6 months is filled in, and new months keep filling in from this grid automatically.'));
+    if (a.result) content.push(h('div', { class: 'card success-card' }, a.result));
+
+    // Rows = post names across services, in template order.
+    const postNames = [];
+    for (const s of services) for (const p of postsOfSeries(s.id)) if (!postNames.includes(p.post)) postNames.push(p.post);
+    const inactiveIds = new Set(state.data.roster.filter((r) => !r.active).map((r) => r.id));
+
+    for (let w = 1; w <= 5; w++) {
+      const dates = sundaysForWeek(w);
+      const warnings = [];
+      // Duplicates within a service, CCW problems, people on both services.
+      const perService = services.map((s) => postsOfSeries(s.id).map((p) => ({ s, p, id: a.draft[slotKey(p.id, w)] })).filter((x) => x.id));
+      const dupCells = new Set();
+      perService.forEach((cells) => {
+        const seen = {};
+        for (const c of cells) (seen[c.id] = seen[c.id] || []).push(c);
+        for (const [id, list] of Object.entries(seen)) if (list.length > 1) {
+          list.forEach((c) => dupCells.add(slotKey(c.p.id, w)));
+          warnings.push(`${rosterName(id)} is on ${list.length} posts in ${list[0].s.title}.`);
+        }
+      });
+      const ccwCells = new Set();
+      perService.flat().forEach((c) => {
+        if (c.p.requires_ccw && !ccwOkForever(byId(c.id))) { ccwCells.add(slotKey(c.p.id, w)); warnings.push(`${c.p.post} (${c.s.title}) needs a CCW-qualified person; ${rosterName(c.id)} isn't.`); }
+        if (inactiveIds.has(c.id)) warnings.push(`${rosterName(c.id)} is marked inactive on the roster.`);
+      });
+      const both = services.length > 1 ? [...new Set(perService[0].map((c) => c.id))].filter((id) => perService.slice(1).some((cells) => cells.some((c) => c.id === id))) : [];
+
+      const table = h('table', { class: 'assign-grid' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Post'), services.map((s) => h('th', {}, s.title.replace(/^sunday\s*[-–—]?\s*/i, '') || s.title)))),
+        h('tbody', {}, postNames.map((name) => h('tr', {},
+          h('th', { scope: 'row' }, h('div', {}, name), services.some((s) => postsOfSeries(s.id).some((p) => p.post === name && p.requires_ccw)) ? h('span', { class: 'badge ccw inline' }, 'CCW') : null),
+          services.map((s) => {
+            const p = postsOfSeries(s.id).find((x) => x.post === name);
+            if (!p) return h('td', { class: 'muted small' }, '—');
+            const k = slotKey(p.id, w);
+            const sel = h('select', { class: 'input assign-sel' + (dupCells.has(k) || ccwCells.has(k) ? ' warn' : ''), 'aria-label': `${WEEK_LABELS[w - 1]} Sunday, ${s.title}, ${name}` },
+              h('option', { value: '' }, '— Open —'),
+              people.map((r) => h('option', { value: r.id }, r.name + (ccwOkForever(r) ? ' · CCW' : ''))),
+              a.draft[k] && !people.some((r) => r.id === a.draft[k]) ? h('option', { value: a.draft[k] }, rosterName(a.draft[k]) + ' (inactive)') : null);
+            sel.value = a.draft[k] || '';
+            sel.addEventListener('change', () => { a.draft[k] = sel.value; a.dirty = true; a.result = null; render(); });
+            return h('td', {}, sel);
+          })))));
+
+      content.push(h('div', { class: 'card assign-week' },
+        h('div', { class: 'row' },
+          h('h3', { class: 'grow' }, `${WEEK_LABELS[w - 1]} Sunday`),
+          w > 1 ? h('button', { class: 'btn small', onclick: () => copyWeek(services, w - 1, w) }, `Copy ${WEEK_LABELS[w - 2]}`) : null),
+        h('div', { class: 'muted tiny' }, dates.length ? 'Next 6 months: ' + dates.map(shortDate).join(', ') : 'No months in the next 6 have a 5th Sunday.'),
+        h('div', { class: 'assign-scroll' }, table),
+        warnings.length ? h('div', { class: 'notice small' }, [...new Set(warnings)].join(' ')) : null,
+        both.length ? h('div', { class: 'muted tiny' }, 'On both services: ' + both.map(rosterName).join(', ')) : null));
+    }
+
+    const replace = h('input', { type: 'checkbox', id: 'assign_replace' });
+    replace.checked = a.replace;
+    replace.addEventListener('change', () => { a.replace = replace.checked; });
+    content.push(h('div', { class: 'card assign-apply' },
+      h('div', { class: 'field check' }, h('label', { for: 'assign_replace' }, replace, 'Also replace one-off changes'),
+        h('div', { class: 'hint' }, 'Off (recommended): swaps, covers, volunteers and changes an admin made on a specific date are kept. On: every Sunday is reset to this grid.')),
+      h('button', { class: 'btn primary block', onclick: (e) => applyRotation(services, e.currentTarget) }, 'Apply to next 6 months'),
+      a.dirty ? h('button', { class: 'btn block', onclick: () => { state.assign = null; render(); } }, 'Discard changes') : null,
+      services.filter((s) => s.use_rotation).length ? h('p', { class: 'muted tiny' }, 'Services and posts come from the repeating Sunday events. To add a post or change times, edit the event on the Schedule tab (All events).') : null));
+
+    return { title: 'Update assignments', back: '#/schedule', content };
+  }
+
+  function copyWeek(services, from, to) {
+    const a = state.assign;
+    for (const s of services) for (const p of postsOfSeries(s.id)) a.draft[slotKey(p.id, to)] = a.draft[slotKey(p.id, from)] || '';
+    a.dirty = true; a.result = null;
+    render();
+    toast(`Copied the ${WEEK_LABELS[from - 1]} Sunday into the ${WEEK_LABELS[to - 1]}`);
+  }
+
+  async function applyRotation(services, btn) {
+    const a = state.assign;
+    const msg = a.replace
+      ? 'Fill every Sunday in the next 6 months from this grid, replacing swaps, covers and other one-off changes?'
+      : 'Fill every Sunday in the next 6 months from this grid? Swaps, covers and other one-off changes are kept.';
+    if (!confirm(msg)) return;
+    btn.disabled = true; btn.textContent = 'Applying…';
+    const payload = {
+      replace_changes: a.replace,
+      series: services.flatMap((g) => {
+        const mainPosts = postsOfSeries(g.main.id);
+        return g.series.map((sr) => ({
+          series_id: sr.id,
+          slots: postsOfSeries(sr.id).flatMap((p) => {
+            const mp = mainPosts.find((x) => x.post === p.post);
+            return mp ? [1, 2, 3, 4, 5].map((w) => ({ series_post_id: p.id, week: w, roster_id: a.draft[slotKey(mp.id, w)] || null })) : [];
+          })
+        }));
+      })
+    };
+    const { data, error } = await sb.rpc('save_rotation', { p: payload });
+    if (error) { btn.disabled = false; btn.textContent = 'Apply to next 6 months'; toast(friendlyError(error), 5000); return; }
+    await Promise.all(['events', 'shifts', 'event_series', 'series_posts', 'rotation_slots'].map(refreshTable));
+    const r = data || {};
+    state.assign = null;
+    const st = assignDraft(sundayServices());
+    st.result = `Done. ${r.updated || 0} post${r.updated === 1 ? '' : 's'} updated across ${r.sundays || 0} upcoming Sunday${r.sundays === 1 ? '' : 's'}` +
+      (r.kept ? `; ${r.kept} one-off change${r.kept === 1 ? '' : 's'} kept.` : '.');
+    render();
+    window.scrollTo(0, 0);
+    toast('Schedule updated');
+  }
+
+  function setupSundayServices() {
+    const next = new Date(); next.setDate(next.getDate() + ((7 - next.getDay()) % 7 || 7));
+    openForm({
+      title: 'Set up Sunday services',
+      intro: h('p', { class: 'muted small' }, 'Creates two services that repeat every Sunday, each with the posts below. You can change them later on the Schedule tab.'),
+      values: { first_start: '08:15', first_end: '10:15', second_start: '10:45', second_end: '12:45', posts: 'Front Door, Mid Hallway, Back Hallway', starts_on: ymd(next) },
+      fields: [
+        { name: 'first_start', label: '1st Service: security starts', type: 'time', required: true },
+        { name: 'first_end', label: '1st Service: security ends', type: 'time', required: true },
+        { name: 'second_start', label: '2nd Service: security starts', type: 'time', required: true },
+        { name: 'second_end', label: '2nd Service: security ends', type: 'time', required: true },
+        { name: 'posts', label: 'Positions (comma-separated)', required: true },
+        { name: 'starts_on', label: 'Starting Sunday', type: 'date', required: true },
+        { name: 'location', label: 'Location (optional)' }
+      ],
+      submitLabel: 'Create',
+      onSubmit: async (v) => {
+        if (dateOnly(v.starts_on).getDay() !== 0) throw new Error('Pick a Sunday for the starting date.');
+        const posts = v.posts.split(',').map((x) => x.trim()).filter(Boolean).map((post) => ({ post, requires_ccw: false, roster_id: null }));
+        if (!posts.length) throw new Error('Enter at least one position.');
+        for (const [title, st, en] of [['Sunday 1st Service', v.first_start, v.first_end], ['Sunday 2nd Service', v.second_start, v.second_end]]) {
+          const { error } = await sb.rpc('save_event_series', { p: {
+            title, start_time: st, end_time: en, location: v.location || '', notes: '', freq: 'weekly', interval_n: 1,
+            by_weekday: [0], starts_on: v.starts_on, until: '', posts
+          } });
+          if (error) throw error;
+        }
+        state.assign = null;
+        await afterSaveSchedule('Sunday services created');
+      }
+    });
+  }
+
+  // ------------------------------------------------------------------
   // More / account / users
   // ------------------------------------------------------------------
   const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
@@ -1710,6 +1923,10 @@
           h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Manage users'),
             h('div', { class: 'sub' }, n ? `${n} waiting for approval` : 'Approve sign-ups and manage access')),
           n ? h('span', { class: 'badge urgent' }, n) : null,
+          icon('chev')),
+        h('a', { class: 'list-item', href: '#/assignments' },
+          h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Update assignments'),
+            h('div', { class: 'sub' }, 'Fill Sunday posts by week of the month')),
           icon('chev'))));
     }
 

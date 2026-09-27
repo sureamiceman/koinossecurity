@@ -339,3 +339,18 @@ input:focus, select:focus, textarea:focus, .btn:focus-visible, .chip:focus-visib
 
 .dlg-intro { margin: 0 0 14px; }
 .team-contact .plain { background: none; border: 0; padding: 0; text-align: left; color: inherit; font: inherit; cursor: pointer; min-width: 0; }
+
+/* Update assignments */
+.assign-link { margin-bottom: 12px; }
+.assign-week h3 { margin: 0; font-size: 1.05rem; }
+.assign-week .muted.tiny { margin: 4px 0 8px; }
+.assign-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.assign-grid { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.assign-grid th, .assign-grid td { padding: 3px; text-align: left; vertical-align: middle; }
+.assign-grid thead th { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.assign-grid tbody th { font-weight: 600; padding-right: 6px; width: 1%; min-width: 72px; }
+.assign-grid tbody th .badge { margin: 2px 0 0; }
+.assign-sel { min-width: 104px; width: 100%; padding: 8px 4px; font-size: .88rem; }
+.assign-sel.warn { border-color: var(--caution); background: var(--caution-bg); }
+.assign-week .notice { margin: 8px 0 0; }
+.success-card { background: var(--info-bg); color: var(--info); font-weight: 600; }
