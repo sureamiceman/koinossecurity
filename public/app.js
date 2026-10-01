@@ -453,7 +453,7 @@
     dlg.showModal();
   }
 
-  // Rows of: post name · CCW required · default person · remove
+  // Rows of: post name · CCW preferred · default person · remove
   function postsEditor(initial, f) {
     const el = h('div', { class: 'posts-editor' });
     const list = h('div', {});
@@ -463,7 +463,7 @@
     const addRow = (p = {}) => {
       const name = h('input', { type: 'text', class: 'pe-name', placeholder: 'Post (e.g. Parking lot)', list: listId, 'aria-label': 'Post name' });
       name.value = p.post || '';
-      const ccw = h('input', { type: 'checkbox', 'aria-label': 'CCW required' });
+      const ccw = h('input', { type: 'checkbox', 'aria-label': 'CCW preferred' });
       ccw.checked = !!p.requires_ccw;
       const who = h('select', { class: 'pe-who', 'aria-label': f.personLabel || 'Default person' },
         h('option', { value: '' }, f.openLabel || 'Open'),
@@ -473,7 +473,7 @@
       const check = () => {
         const r = people.find((x) => x.id === who.value);
         const bad = ccw.checked && r && !(r.ccw_qualified && (!r.ccw_expires_on || daysUntil(r.ccw_expires_on) >= 0));
-        warn.textContent = bad ? `${r.name} isn't CCW-qualified (or it has expired).` : '';
+        warn.textContent = bad ? `Heads up: ${r.name} isn't CCW-qualified (or it has expired). That's allowed; the post will be flagged.` : '';
         warn.classList.toggle('hidden', !bad);
       };
       ccw.addEventListener('change', check);
@@ -482,7 +482,7 @@
       const rm = h('button', { type: 'button', class: 'icon-btn pe-rm', 'aria-label': 'Remove post', onclick: () => { rows.splice(rows.indexOf(row), 1); rowEl.remove(); } }, icon('x'));
       const rowEl = h('div', { class: 'pe-row' },
         h('div', { class: 'pe-line' }, name, rm),
-        h('div', { class: 'pe-line' }, h('label', { class: 'pe-ccw' }, ccw, 'CCW required'), who),
+        h('div', { class: 'pe-line' }, h('label', { class: 'pe-ccw' }, ccw, 'CCW preferred'), who),
         warn);
       rows.push(row);
       list.append(rowEl);
@@ -1345,37 +1345,38 @@
       url ? h('img', { src: url, alt: '', loading: 'lazy' }) : initials(r.name));
   }
 
+  // "CCW" with a red line through it: the person on a CCW-preferred post isn't CCW-qualified.
+  const noCcwBadge = () => h('span', { class: 'badge no-ccw', title: 'Not CCW-qualified on this date', 'aria-label': 'Not CCW-qualified' }, 'CCW');
+
   function shiftRow(s, e, me, upcoming) {
     const mine = me && s.roster_id === me.id;
     const st = shiftStart(s, e), en = shiftEnd(s, e);
     const customTime = s.starts_at || s.ends_at;
     const assigned = s.roster_id && state.data.roster.find((r) => r.id === s.roster_id);
+    // CCW is preferred, never required: anyone can take the post, but a mismatch is flagged.
     const notCcw = s.requires_ccw && s.roster_id && !ccwOkOn(assigned, e.starts_at);
-    const iCanCcw = !s.requires_ccw || ccwOkOn(me, e.starts_at);
+    const iMiss = s.requires_ccw && !ccwOkOn(me, e.starts_at);
+    const ccwNote = iMiss ? "\n\nThis post prefers a CCW-qualified person, and you aren't listed as CCW-qualified on this date. You can still take it; it will be flagged on the schedule." : '';
     const actions = [];
     if (upcoming && me) {
       if (!s.roster_id) {
-        actions.push(iCanCcw
-          ? h('button', { class: 'btn small primary', onclick: () => shiftAction('volunteer_shift', { p_shift: s.id }, `Volunteer for ${s.post || 'this post'} at ${e.title}?`, "You're on the schedule — thanks!") }, 'Volunteer')
-          : h('span', { class: 'muted tiny' }, 'CCW required'));
+        actions.push(h('button', { class: 'btn small primary', onclick: () => shiftAction('volunteer_shift', { p_shift: s.id }, `Volunteer for ${s.post || 'this post'} at ${e.title}?` + ccwNote, "You're on the schedule — thanks!") }, 'Volunteer'));
       } else if (mine && !s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => shiftAction('request_cover', { p_shift: s.id, p_on: true }, 'Ask the team to cover this post? You stay assigned until someone takes it.', 'Cover requested — the team can see it now') }, 'Need cover'));
       else if (mine && s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => shiftAction('request_cover', { p_shift: s.id, p_on: false }, null, 'Cover request withdrawn') }, 'Cancel request'));
       else if (s.cover_requested) {
-        actions.push(iCanCcw
-          ? h('button', { class: 'btn small primary', onclick: () => shiftAction('cover_shift', { p_shift: s.id }, `Cover ${rosterName(s.roster_id)}'s ${s.post || 'post'} at ${e.title}?`, "You're covering — thanks!") }, "I'll cover")
-          : h('span', { class: 'muted tiny' }, 'CCW required'));
+        actions.push(h('button', { class: 'btn small primary', onclick: () => shiftAction('cover_shift', { p_shift: s.id }, `Cover ${rosterName(s.roster_id)}'s ${s.post || 'post'} at ${e.title}?` + ccwNote, "You're covering — thanks!") }, "I'll cover"));
       }
     }
     if (isAdmin()) actions.push(h('button', { class: 'btn small', onclick: () => editShift(s, e) }, 'Edit'));
     return h('div', { class: 'shift' + (mine ? ' mine' : '') },
       h('div', { class: 'grow' },
         h('div', { class: 'shift-post' }, s.post || 'Post',
-          s.requires_ccw ? h('span', { class: 'badge ccw inline' }, 'CCW') : null,
+          s.requires_ccw ? h('span', { class: 'badge ccw inline', title: 'CCW-qualified person preferred' }, 'CCW preferred') : null,
           customTime ? h('span', { class: 'muted small' }, ' · ' + timeRange(st, en)) : null),
         h('div', { class: 'shift-person' },
           assigned ? avatar(assigned) : h('span', { class: 'avatar open', 'aria-hidden': 'true' }, '?'),
-          s.roster_id ? h('span', { class: 'person-name' }, rosterName(s.roster_id) + (mine ? ' (you)' : '')) : h('span', { class: 'badge caution' }, 'Open'),
-          notCcw ? h('span', { class: 'badge urgent' }, 'Not CCW') : null,
+          s.roster_id ? h('span', { class: 'person-name' + (notCcw ? ' ccw-miss' : '') }, rosterName(s.roster_id) + (mine ? ' (you)' : '')) : h('span', { class: 'badge caution' }, 'Open'),
+          notCcw ? noCcwBadge() : null,
           s.cover_requested ? h('span', { class: 'badge urgent' }, 'Needs cover') : null),
         s.note ? h('div', { class: 'muted small' }, s.note) : null,
         s.last_change ? h('div', { class: 'muted tiny' }, `${s.last_change} · ${relTime(s.updated_at)}`) : null),
@@ -1482,7 +1483,7 @@
       ...(showPosts ? [{
         name: 'posts', label: 'Posts', type: 'posts',
         hint: mode === 'new'
-          ? 'Each post can require a CCW-qualified person and have a default person. Repeating events copy these to every date.'
+          ? 'Each post can prefer a CCW-qualified person and have a default person. Repeating events copy these to every date.'
           : 'Changes here apply to the dates you chose. Swaps and one-off changes on specific dates are kept.'
       }] : [])
     ];
@@ -1504,7 +1505,7 @@
           const posts = v.posts;
           const bad = posts.filter((p) => p.requires_ccw && p.roster_id).map((p) => state.data.roster.find((r) => r.id === p.roster_id))
             .filter((r) => r && !(r.ccw_qualified && (!r.ccw_expires_on || daysUntil(r.ccw_expires_on) >= 0)));
-          if (bad.length && !confirm(`${bad.map((r) => r.name).join(', ')} ${bad.length > 1 ? 'are' : 'is'} set as default for a CCW post but not CCW-qualified. Save anyway?`)) throw new Error('Change the default person for the CCW post, then save.');
+          if (bad.length) toast(`${bad.map((r) => r.name).join(', ')} ${bad.length > 1 ? 'aren\'t' : 'isn\'t'} CCW-qualified; those posts will be flagged.`, 5000);
         }
         // One date of a series, or a plain event staying plain
         if (mode === 'one' || (mode === 'oneoff' && v.repeat === 'none')) {
@@ -1579,7 +1580,7 @@
       values: { post: s.post || '', requires_ccw: !!s.requires_ccw, roster_id: s.roster_id || '', start: st ? hm(st) : '', end: en ? hm(en) : '', note: s.note || '', cover_requested: !!s.cover_requested, sort_order: s.sort_order || 0 },
       fields: [
         { name: 'post', label: 'Post', required: true, placeholder: 'e.g. Parking lot', list: knownPosts() },
-        { name: 'requires_ccw', label: 'CCW-qualified team member required', type: 'checkbox' },
+        { name: 'requires_ccw', label: 'CCW-qualified team member preferred', type: 'checkbox', hint: 'Anyone can still be assigned, volunteer or cover; someone without a current CCW is flagged in red.' },
         { name: 'roster_id', label: 'Assigned to', type: 'select', options: [['', 'Open — needs a volunteer'], ...people.map((r) => [r.id, r.name + (ccwOkOn(r, e.starts_at) ? ' · CCW' : '')])] },
         { name: 'start', label: 'Start (optional)', type: 'time', hint: `Leave both times blank to use the event time (${timeRange(new Date(e.starts_at), new Date(e.ends_at))}).` },
         { name: 'end', label: 'End (optional)', type: 'time' },
@@ -1591,7 +1592,7 @@
         if (!!v.start !== !!v.end) throw new Error('Enter both a start and end time, or leave both blank.');
         if (v.requires_ccw && v.roster_id) {
           const r = state.data.roster.find((x) => x.id === v.roster_id);
-          if (!ccwOkOn(r, e.starts_at) && !confirm(`${r.name} isn't CCW-qualified on this date (missing or expired). Assign anyway?`)) throw new Error('Pick a CCW-qualified person or leave the post open.');
+          if (!ccwOkOn(r, e.starts_at)) toast(`${r.name} isn't CCW-qualified on this date; the post will be flagged.`, 5000);
         }
         const day = ymd(new Date(e.starts_at));
         const row = {
@@ -1777,7 +1778,7 @@
       });
       const ccwCells = new Set();
       perService.flat().forEach((c) => {
-        if (c.p.requires_ccw && !ccwOkForever(byId(c.id))) { ccwCells.add(slotKey(c.p.id, w)); warnings.push(`${c.p.post} (${c.s.title}) needs a CCW-qualified person; ${rosterName(c.id)} isn't.`); }
+        if (c.p.requires_ccw && !ccwOkForever(byId(c.id))) { ccwCells.add(slotKey(c.p.id, w)); warnings.push(`${c.p.post} (${c.s.title}) prefers a CCW-qualified person; ${rosterName(c.id)} isn't (allowed, but flagged).`); }
         if (inactiveIds.has(c.id)) warnings.push(`${rosterName(c.id)} is marked inactive on the roster.`);
       });
       const both = services.length > 1 ? [...new Set(perService[0].map((c) => c.id))].filter((id) => perService.slice(1).some((cells) => cells.some((c) => c.id === id))) : [];
@@ -1785,7 +1786,7 @@
       const table = h('table', { class: 'assign-grid' },
         h('thead', {}, h('tr', {}, h('th', {}, 'Post'), services.map((s) => h('th', {}, s.title.replace(/^sunday\s*[-–—]?\s*/i, '') || s.title)))),
         h('tbody', {}, postNames.map((name) => h('tr', {},
-          h('th', { scope: 'row' }, h('div', {}, name), services.some((s) => postsOfSeries(s.id).some((p) => p.post === name && p.requires_ccw)) ? h('span', { class: 'badge ccw inline' }, 'CCW') : null),
+          h('th', { scope: 'row' }, h('div', {}, name), services.some((s) => postsOfSeries(s.id).some((p) => p.post === name && p.requires_ccw)) ? h('span', { class: 'badge ccw inline', title: 'CCW preferred' }, 'CCW pref.') : null),
           services.map((s) => {
             const p = postsOfSeries(s.id).find((x) => x.post === name);
             if (!p) return h('td', { class: 'muted small' }, '—');

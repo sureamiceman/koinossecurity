@@ -972,7 +972,7 @@ grant execute on function public.extend_series() to authenticated;
 grant execute on function public.save_event_series(jsonb) to authenticated;
 grant execute on function public.delete_series_event(uuid, text) to authenticated;
 
--- CCW check used by self-service volunteering and covering.
+-- CCW check (kept for reference/reporting; volunteering and covering no longer require it).
 create or replace function public.ccw_ok(p_roster uuid, p_on date) returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from public.roster
@@ -996,9 +996,7 @@ begin
   if not found then raise exception 'Post not found'; end if;
   if s.event_end < now() then raise exception 'That event is already over'; end if;
   if s.roster_id is not null then raise exception 'That post is already filled'; end if;
-  if s.requires_ccw and not public.ccw_ok(me, (s.event_start at time zone 'America/New_York')::date) then
-    raise exception 'This post needs a CCW-qualified team member, and your CCW qualification is missing or expires before this date.';
-  end if;
+  -- CCW is preferred, not required: the app flags a mismatch instead of blocking it.
   select name into my_name from public.roster where id = me;
   update public.shifts
      set roster_id = me, cover_requested = false, last_change = my_name || ' volunteered'
@@ -1043,9 +1041,7 @@ begin
   if s.event_end < now() then raise exception 'That event is already over'; end if;
   if not s.cover_requested then raise exception 'That post no longer needs cover'; end if;
   if s.roster_id = me then raise exception 'This is already your post'; end if;
-  if s.requires_ccw and not public.ccw_ok(me, (s.event_start at time zone 'America/New_York')::date) then
-    raise exception 'This post needs a CCW-qualified team member, and your CCW qualification is missing or expires before this date.';
-  end if;
+  -- CCW is preferred, not required: the app flags a mismatch instead of blocking it.
   select name into my_name from public.roster where id = me;
   select name into prev_name from public.roster where id = s.roster_id;
   update public.shifts
