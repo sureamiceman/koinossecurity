@@ -1,7 +1,7 @@
 // Koinos Security service worker.
 // App files: network first (always fresh when online), cached copy when offline.
 // Supabase data requests are never touched here; the app keeps its own offline copy.
-const CACHE = 'koinos-shell-v1';
+const CACHE = 'koinos-shell-v2';
 const SHELL = [
   '/', '/index.html', '/styles.css', '/app.js', '/config.js',
   '/vendor/supabase.js', '/manifest.webmanifest',
@@ -37,5 +37,37 @@ self.addEventListener('fetch', (event) => {
       if (cached) return cached;
       throw err;
     }
+  })());
+});
+
+// Push notifications (sent by netlify/functions/push.mjs).
+self.addEventListener('push', (event) => {
+  let d = {};
+  try { d = event.data ? event.data.json() : {}; } catch { d = { body: event.data && event.data.text() }; }
+  event.waitUntil(self.registration.showNotification(d.title || 'Koinos Security', {
+    body: d.body || '',
+    tag: d.tag || undefined,
+    renotify: !!d.tag,
+    icon: '/icons/icon-192.png',
+    badge: '/icons/favicon-32.png',
+    data: { url: d.url || '#/alerts' }
+  }));
+});
+
+// Tapping a notification opens (or focuses) the app on the right screen.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const hash = (event.notification.data && event.notification.data.url) || '';
+  const target = new URL('/' + (hash.startsWith('#') ? hash : ''), self.location.origin).href;
+  event.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const w of wins) {
+      if (new URL(w.url).origin === self.location.origin) {
+        await w.focus();
+        w.postMessage({ type: 'open', hash });
+        return;
+      }
+    }
+    await self.clients.openWindow(target);
   })());
 });

@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [] });
   const state = {
     session: null,
     profile: null,
@@ -167,7 +167,9 @@
     calendar_feeds: (t) => t.select('*').order('created_at'),
     event_series: (t) => t.select('*'),
     series_posts: (t) => t.select('*').order('sort_order'),
-    rotation_slots: (t) => t.select('*')
+    rotation_slots: (t) => t.select('*'),
+    posts: (t) => t.select('*').order('last_activity_at', { ascending: false }),
+    post_replies: (t) => t.select('*').order('created_at')
   };
 
   function loadCachedData() {
@@ -192,6 +194,7 @@
       try { await sb.rpc('extend_series'); } catch { /* offline */ }
     }
     const errors = (await Promise.all(Object.keys(QUERIES).map(refreshTable))).filter(Boolean);
+    if (!errors.length) await purgeBoard().catch(() => {});
     await resolvePhotos();
     render();
     if (errors.length) toast(navigator.onLine ? 'Could not refresh — showing saved information' : 'Offline — showing saved information');
@@ -200,7 +203,7 @@
 
   async function resolvePhotos() {
     if (Date.now() - state.photoUrlsAt > 6 * 3600 * 1000) { state.photoUrls = {}; state.photoUrlsAt = Date.now(); }
-    const paths = [...new Set([...state.data.bulletins, ...state.data.roster, ...state.data.profiles, state.profile || {}]
+    const paths = [...new Set([...state.data.bulletins, ...state.data.roster, ...state.data.profiles, state.profile || {}, ...state.data.posts, ...state.data.post_replies]
       .map((r) => r.photo_path).filter((p) => p && !state.photoUrls[p]))];
     if (!paths.length) return;
     const { data, error } = await sb.storage.from('photos').createSignedUrls(paths, 12 * 3600);
@@ -230,6 +233,16 @@
           const e = eventOf(n);
           toast(`Cover needed: ${n.post || 'a post'}${e ? ' – ' + e.title : ''}`, 5000);
         }
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'posts' }, (payload) => {
+        clearTimeout(state.boardTimer);
+        state.boardTimer = setTimeout(async () => { await Promise.all([refreshTable('posts'), refreshTable('post_replies')]); await resolvePhotos(); render(); }, 400);
+        const n = payload.new || {};
+        if (payload.eventType === 'INSERT' && n.author_id !== state.profile.id && route()[0] !== 'board') toast(n.kind === 'swap' ? 'New cover request on the board' : 'New post on the team board', 4000);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'post_replies' }, () => {
+        clearTimeout(state.boardTimer);
+        state.boardTimer = setTimeout(async () => { await Promise.all([refreshTable('posts'), refreshTable('post_replies')]); await resolvePhotos(); render(); }, 400);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => {
         clearTimeout(state.eventsTimer);
@@ -673,6 +686,7 @@
       render();
       await refreshAll();
       subscribe();
+      syncPush();
       maybePromptProfile();
     } else {
       render();
@@ -699,6 +713,7 @@
   const TABS = [
     ['alerts', 'Alerts', 'bell'],
     ['schedule', 'Schedule', 'calendar'],
+    ['board', 'Board', 'msg'],
     ['sops', 'SOPs', 'book'],
     ['contacts', 'Contacts', 'phone'],
     ['team', 'Team', 'users'],
@@ -717,7 +732,7 @@
   function mainView() {
     let [tab, id] = route();
     if ((tab === 'users' || tab === 'assignments') && !isAdmin()) tab = 'more';
-    const views = { alerts: alertsView, schedule: scheduleView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView, assignments: assignmentsView };
+    const views = { alerts: alertsView, schedule: scheduleView, board: boardView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView, assignments: assignmentsView };
     const v = (views[tab] || alertsView)(id);
     const activeTab = tab === 'users' ? 'more' : tab === 'assignments' ? 'schedule' : (views[tab] ? tab : 'alerts');
 
@@ -736,7 +751,7 @@
       navigator.onLine ? null : h('div', { class: 'offline-bar' }, 'Offline — showing saved information'),
       h('main', {}, v.content),
       h('nav', { class: 'tabbar', 'aria-label': 'Main' }, TABS.map(([key, label, ic]) => {
-        const count = key === 'alerts' ? alertCount : key === 'more' ? moreCount : key === 'schedule' ? coverCount() : 0;
+        const count = key === 'alerts' ? alertCount : key === 'more' ? moreCount : key === 'schedule' ? coverCount() : key === 'board' && activeTab !== 'board' ? unseenBoard() : 0;
         return h('a', { href: '#/' + key, class: activeTab === key ? 'active' : null, 'aria-current': activeTab === key ? 'page' : null },
           icon(ic), label, count ? h('span', { class: 'dot' }, count > 9 ? '9+' : count) : null);
       })));
@@ -817,6 +832,7 @@
         if (!isNew) row.active = v.active;
         try { await saveRow('bulletins', b.id, row); } catch (e) { if (ph.path && ph.path !== b.photo_path) removePhoto(ph.path); throw e; }
         removePhoto(ph.oldToRemove);
+        if (isNew) notifyServer();
         await afterSave('bulletins', isNew ? 'Bulletin posted' : 'Saved');
       },
       onDelete: isNew ? null : async () => {
@@ -914,12 +930,13 @@
     });
   }
 
-  function editSop(s) {
+  function editSop(s, prefill) {
     const isNew = !s;
     s = s || {};
     openForm({
       title: isNew ? 'New SOP' : 'Edit SOP',
-      values: s,
+      intro: prefill ? h('p', { class: 'muted small' }, 'Started from a board thread. Tidy it up, then save. The thread itself is not changed.') : null,
+      values: isNew && prefill ? prefill : s,
       fields: [
         { name: 'title', label: 'Title', required: true, placeholder: 'e.g. Medical emergency response' },
         { name: 'category', label: 'Category', required: true, default: 'General', list: categoriesOf(state.data.sops), hint: 'Pick an existing category or type a new one.' },
@@ -928,7 +945,7 @@
       ],
       onSubmit: async (v) => {
         await saveRow('sops', s.id, v);
-        await afterSave('sops', isNew ? 'SOP added' : 'SOP saved');
+        await afterSave('sops', isNew ? (prefill ? 'SOP created from the thread' : 'SOP added') : 'SOP saved');
       },
       onDelete: isNew ? null : async () => {
         await deleteRow('sops', s.id);
@@ -1128,7 +1145,9 @@
           throw e;
         }
         removePhoto(ph.oldToRemove);
+        if (row.profile_id && row.profile_id !== p.profile_id) notifyServer(); // welcome post
         await afterSave('roster', isNew ? 'Team member added' : 'Saved');
+        refreshTable('posts');
       },
       onDelete: isNew ? null : async () => {
         await deleteRow('roster', p.id);
@@ -1388,6 +1407,7 @@
     const { error } = await sb.rpc(fn, args);
     if (error) { toast(friendlyError(error), 5000); await refreshTable('shifts'); render(); return; }
     await refreshTable('shifts');
+    if (fn === 'request_cover' || fn === 'cover_shift') { notifyServer(); await Promise.all([refreshTable('posts'), refreshTable('post_replies')]); }
     render();
     toast(doneText);
   }
@@ -1688,6 +1708,436 @@
   }
 
   // ------------------------------------------------------------------
+  // Team board: posts, replies, photos; cover/swap posts tied to the schedule.
+  // Unpinned threads are deleted 90 days after their last activity.
+  // ------------------------------------------------------------------
+  const BOARD_DAYS = 90;
+  const KIND_LABELS = { general: 'Post', swap: 'Cover / swap', intro: 'Welcome' };
+  const repliesOf = (pid) => state.data.post_replies.filter((r) => r.post_id === pid).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const rosterOfProfile = (pid) => state.data.roster.find((r) => r.profile_id === pid);
+  const authorName = (pid) => { const r = rosterOfProfile(pid); return (r && r.name) || nameOf(pid) || 'Former member'; };
+  function authorAvatar(pid) {
+    const r = rosterOfProfile(pid);
+    if (r) return avatar(r);
+    const p = state.data.profiles.find((x) => x.id === pid);
+    const url = p && p.photo_path && state.photoUrls[p.photo_path];
+    return h('span', { class: 'avatar' }, url ? h('img', { src: url, alt: '' }) : initials(authorName(pid)));
+  }
+  const canEditBoard = (row) => row.author_id === state.profile.id;
+  const canDeleteBoard = (row) => row.author_id === state.profile.id || isAdmin();
+  const purgeDate = (p) => { const d = new Date(p.last_activity_at); d.setDate(d.getDate() + BOARD_DAYS); return d; };
+
+  function unseenBoard() {
+    const me = state.profile && state.profile.id;
+    const seen = state.lastSeenBoard || 0;
+    const posts = state.data.posts.filter((p) => p.author_id !== me && new Date(p.created_at).getTime() > seen).length;
+    const replies = state.data.post_replies.filter((r) => r.author_id !== me && new Date(r.created_at).getTime() > seen).length;
+    return posts + replies;
+  }
+
+  // Tell the server to send notifications for anything new (fire and forget).
+  function notifyServer() {
+    if (!state.session) return;
+    fetch('/api/push', { method: 'POST', headers: { Authorization: 'Bearer ' + state.session.access_token, 'Content-Type': 'application/json' }, body: '{}' })
+      .catch(() => {});
+  }
+
+  async function uploadBoardPhoto(file) {
+    const blob = await resizeImage(file, 1400);
+    const path = `board/${state.profile.id}/${crypto.randomUUID()}.jpg`;
+    const { error } = await sb.storage.from('photos').upload(path, blob, { contentType: 'image/jpeg', upsert: false });
+    if (error) throw error;
+    return path;
+  }
+
+  async function afterBoard(msg) {
+    await Promise.all([refreshTable('posts'), refreshTable('post_replies')]);
+    await resolvePhotos();
+    render();
+    if (msg) toast(msg);
+  }
+
+  // Remove old threads (any member's app does this, at most twice a day).
+  async function purgeBoard() {
+    if (!isMember() || Date.now() - (Number(cacheGet('boardPurgedAt')) || 0) < 12 * 3600 * 1000) return;
+    cacheSet('boardPurgedAt', Date.now());
+    const { data, error } = await sb.rpc('purge_board');
+    if (error || !data || !data.length) return;
+    await sb.storage.from('photos').remove(data).catch(() => {});
+    await Promise.all([refreshTable('posts'), refreshTable('post_replies')]);
+  }
+
+  function boardView(id) {
+    if (id) return threadView(id);
+    state.lastSeenBoard = Date.now();
+    cacheSet('lastSeenBoard', state.lastSeenBoard);
+    const f = state.boardFilter || 'all';
+    const chip = (key, label) => h('button', { class: 'chip' + (f === key ? ' on' : ''), onclick: () => { state.boardFilter = key; render(); } }, label);
+    const all = state.data.posts.slice().sort((a, b) => (b.pinned - a.pinned) || (new Date(b.last_activity_at) - new Date(a.last_activity_at)));
+    const openCover = all.filter((p) => p.kind === 'swap' && swapState(p).open).length;
+    const shown = f === 'swap' ? all.filter((p) => p.kind === 'swap') : f === 'pinned' ? all.filter((p) => p.pinned) : all;
+    const content = [h('div', { class: 'chips' }, chip('all', 'All'), chip('swap', openCover ? `Cover & swaps (${openCover})` : 'Cover & swaps'), chip('pinned', 'Pinned'))];
+    const nudge = pushNudge();
+    if (nudge) content.push(nudge);
+    if (!shown.length) content.push(empty(f === 'swap' ? 'No cover or swap requests' : f === 'pinned' ? 'Nothing pinned' : 'No posts yet. Start the conversation!', 'msg'));
+    for (const p of shown) content.push(postCard(p, false));
+    content.push(h('p', { class: 'muted tiny center' }, `Posts are removed ${BOARD_DAYS} days after the last reply unless an admin pins them.`));
+    return { title: 'Team board', action: topAction('+ New', () => newPost()), content };
+  }
+
+  // Cover/swap status, read live from the schedule.
+  function swapState(p) {
+    const s = p.shift_id && state.data.shifts.find((x) => x.id === p.shift_id);
+    const e = s && eventOf(s);
+    if (!s || !e) return { gone: true };
+    const requester = rosterOfProfile(p.author_id);
+    const upcoming = isUpcoming(e);
+    if (s.cover_requested && upcoming) return { s, e, open: true };
+    if (requester && s.roster_id === requester.id) return { s, e, withdrawn: true };
+    return { s, e, coveredBy: s.roster_id };
+  }
+
+  function swapBox(p) {
+    const st = swapState(p);
+    if (st.gone) return h('div', { class: 'swap-box muted small' }, 'This post is no longer on the upcoming schedule.');
+    const { s, e } = st;
+    const me = myRoster();
+    const when = new Date(s.starts_at || e.starts_at);
+    const mineReq = p.author_id === state.profile.id;
+    const actions = [];
+    if (st.open && me && !mineReq && s.roster_id !== me.id) {
+      const miss = s.requires_ccw && !ccwOkOn(me, e.starts_at);
+      actions.push(h('button', { class: 'btn small primary', onclick: async () => {
+        await shiftAction('cover_shift', { p_shift: s.id }, `Cover ${s.post || 'this post'} at ${e.title}?` + (miss ? "\n\nThis post prefers a CCW-qualified person, and you aren't listed as CCW-qualified on this date. You can still take it; it will be flagged." : ''), "You're covering — thanks!");
+        await afterBoard();
+      } }, "I'll cover"));
+    }
+    if (st.open && mineReq) actions.push(h('button', { class: 'btn small', onclick: async () => { await shiftAction('request_cover', { p_shift: s.id, p_on: false }, 'Withdraw your cover request?', 'Cover request withdrawn'); await afterBoard(); } }, 'Withdraw'));
+    return h('div', { class: 'swap-box' + (st.open ? ' open' : '') },
+      h('div', { class: 'grow' },
+        h('div', { class: 'swap-what' }, `${s.post || 'Post'} · ${e.title}`, s.requires_ccw ? h('span', { class: 'badge ccw inline' }, 'CCW preferred') : null),
+        h('div', { class: 'muted small' }, when.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }) + ' · ' + fmtTime(when)),
+        h('div', { class: 'swap-status' },
+          st.open ? h('span', { class: 'badge urgent' }, 'Needs cover')
+            : st.withdrawn ? h('span', { class: 'badge muted-badge' }, 'Request withdrawn')
+              : h('span', { class: 'badge covered' }, 'Covered by ' + rosterName(st.coveredBy)))),
+      actions.length ? h('div', { class: 'shift-actions' }, actions) : null);
+  }
+
+  function introBox(p) {
+    const r = p.roster_id && state.data.roster.find((x) => x.id === p.roster_id);
+    if (!r) return null;
+    return h('button', { type: 'button', class: 'intro-box', onclick: () => openPerson(r) },
+      personPhoto(r, 'intro-photo'),
+      h('div', {}, h('div', { class: 'title' }, r.name), r.position ? h('div', { class: 'muted small' }, r.position) : null, h('div', { class: 'muted tiny' }, 'Tap to see their card')));
+  }
+
+  function photoBlock(path) {
+    if (!path) return null;
+    const url = state.photoUrls[path];
+    return url ? h('img', { class: 'board-photo', src: url, alt: 'Photo', loading: 'lazy', onclick: () => viewPhoto(url) })
+      : h('div', { class: 'muted small' }, 'Photo available when online');
+  }
+
+  function postCard(p, full) {
+    const replies = repliesOf(p.id);
+    const open = () => { location.hash = '#/board/' + encodeURIComponent(p.id); };
+    const body = full || p.body.length <= 280 ? p.body : p.body.slice(0, 279) + '…';
+    return h('article', { class: 'card post-card' + (p.pinned ? ' pinned' : '') + (full ? ' full' : ''), onclick: full ? null : (ev) => { if (!ev.target.closest('button, a, img')) open(); } },
+      h('div', { class: 'post-head' },
+        authorAvatar(p.author_id),
+        h('div', { class: 'grow' },
+          h('div', { class: 'title' }, authorName(p.author_id)),
+          h('div', { class: 'muted tiny' }, relTime(p.created_at) + (p.edited_at ? ' · edited' : ''))),
+        p.pinned ? h('span', { class: 'badge bolo' }, 'Pinned') : null,
+        p.kind !== 'general' ? h('span', { class: 'badge' + (p.kind === 'swap' ? ' caution' : ' medical') }, KIND_LABELS[p.kind]) : null),
+      body ? h('p', { class: 'body-text post-body' }, body) : null,
+      p.kind === 'intro' ? introBox(p) : null,
+      p.kind === 'swap' ? swapBox(p) : null,
+      photoBlock(p.photo_path),
+      full ? null : h('div', { class: 'post-foot' },
+        h('button', { class: 'btn small', onclick: open }, icon('msg'), replies.length ? `${replies.length} repl${replies.length === 1 ? 'y' : 'ies'}` : 'Reply'),
+        replies.length ? h('span', { class: 'muted tiny' }, 'Last reply ' + relTime(replies[replies.length - 1].created_at)) : null));
+  }
+
+  function threadView(id) {
+    const p = state.data.posts.find((x) => x.id === id);
+    if (!p) return { title: 'Team board', back: '#/board', content: [empty('This post was removed or has expired.', 'msg')] };
+    state.lastSeenBoard = Date.now();
+    cacheSet('lastSeenBoard', state.lastSeenBoard);
+    const replies = repliesOf(p.id);
+    const tools = [];
+    if (canEditBoard(p) && p.kind !== 'swap') tools.push(h('button', { class: 'btn small', onclick: () => editPost(p) }, 'Edit'));
+    if (isAdmin()) {
+      tools.push(h('button', { class: 'btn small', onclick: () => setPinned(p, !p.pinned) }, p.pinned ? 'Unpin' : 'Pin (keep)'));
+      tools.push(h('button', { class: 'btn small', onclick: () => postToSop(p) }, 'Make SOP'));
+    }
+    if (canDeleteBoard(p)) tools.push(h('button', { class: 'btn small danger', onclick: () => deletePost(p) }, 'Delete'));
+
+    const content = [postCard(p, true)];
+    if (tools.length) content.push(h('div', { class: 'actions thread-tools' }, tools));
+    content.push(h('div', { class: 'section-title' }, replies.length ? `Replies (${replies.length})` : 'No replies yet'));
+    content.push(h('div', { class: 'reply-list' }, replies.map((r) => h('div', { class: 'reply' },
+      authorAvatar(r.author_id),
+      h('div', { class: 'grow' },
+        h('div', {}, h('strong', {}, authorName(r.author_id)), h('span', { class: 'muted tiny' }, ' · ' + relTime(r.created_at) + (r.edited_at ? ' · edited' : ''))),
+        r.body ? h('div', { class: 'body-text post-body' }, r.body) : null,
+        photoBlock(r.photo_path),
+        canEditBoard(r) || canDeleteBoard(r) ? h('div', { class: 'reply-tools' },
+          canEditBoard(r) ? h('button', { class: 'linkish', onclick: () => editReply(r) }, 'Edit') : null,
+          canDeleteBoard(r) ? h('button', { class: 'linkish danger-text', onclick: () => deleteReply(r) }, 'Delete') : null) : null)))));
+    content.push(replyComposer(p));
+    content.push(h('p', { class: 'muted tiny center' }, p.pinned ? 'Pinned by an admin: this thread is kept.' : `Removed on ${purgeDate(p).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })} unless someone replies or an admin pins it.`));
+    return { title: KIND_LABELS[p.kind] === 'Post' ? 'Post' : KIND_LABELS[p.kind], back: '#/board', content };
+  }
+
+  // Reply box; its text and chosen photo survive live re-renders.
+  function replyComposer(p) {
+    const d = (state.replyDrafts = state.replyDrafts || {})[p.id] || (state.replyDrafts[p.id] = { text: '', file: null });
+    const ta = h('textarea', { id: 'reply_' + p.id, class: 'input', rows: 3, placeholder: 'Write a reply…' });
+    ta.value = d.text;
+    ta.addEventListener('input', () => { d.text = ta.value; });
+    const file = h('input', { type: 'file', accept: 'image/*', id: 'replyphoto_' + p.id, class: 'hidden' });
+    const fileLabel = h('label', { for: 'replyphoto_' + p.id, class: 'btn small' }, d.file ? 'Photo: ' + d.file.name.slice(0, 18) : '+ Photo');
+    file.addEventListener('change', () => { d.file = file.files && file.files[0] || null; render(); });
+    const send = h('button', { class: 'btn primary small', onclick: async () => {
+      const text = d.text.trim();
+      if (!text && !d.file) { ta.focus(); return; }
+      send.disabled = true; send.textContent = 'Sending…';
+      let path = null;
+      try {
+        if (d.file) path = await uploadBoardPhoto(d.file);
+        const { error } = await sb.from('post_replies').insert({ post_id: p.id, author_id: state.profile.id, body: text, photo_path: path });
+        if (error) throw error;
+        state.replyDrafts[p.id] = { text: '', file: null };
+        notifyServer();
+        await afterBoard();
+      } catch (e) {
+        removePhoto(path);
+        send.disabled = false; send.textContent = 'Send';
+        toast(friendlyError(e), 5000);
+      }
+    } }, 'Send');
+    return h('div', { class: 'card reply-box' }, ta, file,
+      h('div', { class: 'row' }, fileLabel, d.file ? h('button', { class: 'linkish', onclick: () => { d.file = null; render(); } }, 'Remove photo') : null, h('div', { class: 'grow' }), send));
+  }
+
+  function myCoverableShifts() {
+    const me = myRoster();
+    if (!me) return [];
+    return state.data.shifts.filter((s) => s.roster_id === me.id && !s.cover_requested)
+      .map((s) => ({ s, e: eventOf(s) })).filter((x) => x.e && isUpcoming(x.e))
+      .sort((a, b) => new Date(a.e.starts_at) - new Date(b.e.starts_at));
+  }
+
+  function newPost(kind = 'general') {
+    const mine = myCoverableShifts();
+    openForm({
+      title: 'New post',
+      values: { kind },
+      fields: [
+        { name: 'kind', label: 'Type', type: 'select', options: [['general', 'General post'], ['swap', 'Ask for cover / offer a date to swap'], ['intro', 'Introduce someone / say hello']] },
+        { name: 'shift', label: 'Which of your posts?', type: 'select', visible: (v) => v.kind === 'swap',
+          options: mine.length ? mine.map(({ s, e }) => [s.id, `${new Date(s.starts_at || e.starts_at).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} · ${s.post || 'Post'} · ${e.title}`])
+            : [['', myRoster() ? 'You have no upcoming posts to offer' : 'Your sign-in is not linked to the roster yet']],
+          hint: 'The schedule marks it "Needs cover" and anyone who takes it is put on the schedule automatically.' },
+        { name: 'body', label: 'Message', type: 'textarea', rows: 5, placeholder: 'Write something to the team…' },
+        { name: 'photo', label: 'Photo (optional)', type: 'photo', visible: (v) => v.kind !== 'swap' }
+      ],
+      submitLabel: 'Post',
+      onSubmit: async (v, photo) => {
+        if (v.kind === 'swap') {
+          if (!v.shift) throw new Error('Pick one of your upcoming posts to offer.');
+          const { error } = await sb.rpc('create_swap_post', { p_shift: v.shift, p_body: v.body });
+          if (error) throw error;
+          await refreshTable('shifts');
+        } else {
+          if (!v.body && !photo.file) throw new Error('Write a message or add a photo.');
+          const path = photo.file ? await uploadBoardPhoto(photo.file) : null;
+          const { error } = await sb.from('posts').insert({ author_id: state.profile.id, kind: v.kind, body: v.body, photo_path: path });
+          if (error) { removePhoto(path); throw error; }
+        }
+        notifyServer();
+        location.hash = '#/board';
+        await afterBoard('Posted');
+      }
+    });
+  }
+
+  function editPost(p) {
+    openForm({
+      title: 'Edit post',
+      values: { body: p.body },
+      fields: [
+        { name: 'body', label: 'Message', type: 'textarea', rows: 6 },
+        { name: 'photo', label: 'Photo', type: 'photo', currentUrl: p.photo_path ? state.photoUrls[p.photo_path] : null }
+      ],
+      onSubmit: async (v, photo) => {
+        let path = p.photo_path;
+        if (photo.file) path = await uploadBoardPhoto(photo.file);
+        else if (photo.remove) path = null;
+        const { error } = await sb.from('posts').update({ body: v.body, photo_path: path }).eq('id', p.id);
+        if (error) { if (path !== p.photo_path) removePhoto(path); throw error; }
+        if (path !== p.photo_path) removePhoto(p.photo_path);
+        await afterBoard('Saved');
+      }
+    });
+  }
+
+  function editReply(r) {
+    openForm({
+      title: 'Edit reply',
+      values: { body: r.body },
+      fields: [{ name: 'body', label: 'Reply', type: 'textarea', rows: 4 }],
+      onSubmit: async (v) => {
+        const { error } = await sb.from('post_replies').update({ body: v.body }).eq('id', r.id);
+        if (error) throw error;
+        await afterBoard('Saved');
+      }
+    });
+  }
+
+  async function deletePost(p) {
+    if (!confirm(p.kind === 'swap' ? 'Delete this post? (Your cover request stays on the schedule; withdraw it there if you no longer need cover.)' : 'Delete this post and all its replies?')) return;
+    const paths = [p.photo_path, ...repliesOf(p.id).map((r) => r.photo_path)].filter(Boolean);
+    const { error } = await sb.from('posts').delete().eq('id', p.id);
+    if (error) { toast(friendlyError(error)); return; }
+    if (paths.length) sb.storage.from('photos').remove(paths).catch(() => {});
+    location.hash = '#/board';
+    await afterBoard('Post deleted');
+  }
+
+  async function deleteReply(r) {
+    if (!confirm('Delete this reply?')) return;
+    const { error } = await sb.from('post_replies').delete().eq('id', r.id);
+    if (error) { toast(friendlyError(error)); return; }
+    removePhoto(r.photo_path);
+    await afterBoard('Reply deleted');
+  }
+
+  async function setPinned(p, pinned) {
+    const { error } = await sb.from('posts').update({ pinned }).eq('id', p.id);
+    if (error) { toast(friendlyError(error)); return; }
+    await afterBoard(pinned ? 'Pinned: this thread will be kept' : `Unpinned: removed ${BOARD_DAYS} days after the last activity`);
+  }
+
+  // Start a new SOP from a thread (post plus replies); the admin edits before saving.
+  function postToSop(p) {
+    const firstLine = (p.body.split('\n').find((l) => l.trim()) || 'New procedure').trim();
+    const replies = repliesOf(p.id).filter((r) => r.body);
+    const body = [p.body.trim(), ...replies.map((r) => `${authorName(r.author_id)}: ${r.body.trim()}`)].filter(Boolean).join('\n\n');
+    editSop(null, { title: firstLine.length > 80 ? firstLine.slice(0, 79) + '…' : firstLine, category: 'General', body });
+  }
+
+  // ------------------------------------------------------------------
+  // Push notifications (this device)
+  // ------------------------------------------------------------------
+  const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  function b64ToBytes(s) {
+    const pad = '='.repeat((4 - (s.length % 4)) % 4);
+    const raw = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'));
+    return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+  }
+  async function currentPushSub() {
+    if (!pushSupported()) return null;
+    const reg = await navigator.serviceWorker.getRegistration();
+    return reg ? reg.pushManager.getSubscription() : null;
+  }
+  // Works out what the More screen should offer.
+  async function refreshPushStatus() {
+    let status;
+    if (!pushSupported()) status = isIOS() && !isStandalone() ? 'needs-install' : 'unsupported';
+    else if (Notification.permission === 'denied') status = 'blocked';
+    else status = (await currentPushSub().catch(() => null)) ? 'on' : 'off';
+    if (state.pushStatus !== status) { state.pushStatus = status; render(); }
+    return status;
+  }
+  async function saveSub(sub) {
+    const j = sub.toJSON();
+    const { error } = await sb.rpc('save_push_subscription', { p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth, p_ua: navigator.userAgent });
+    if (error) throw error;
+  }
+  async function enablePush() {
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { await refreshPushStatus(); toast(perm === 'denied' ? 'Notifications are blocked. Allow them in your phone settings.' : 'Notifications not turned on'); return; }
+      const reg = await navigator.serviceWorker.ready;
+      const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(cfg.vapidPublicKey) });
+      await saveSub(sub);
+      await refreshPushStatus();
+      toast('Notifications are on for this device');
+    } catch (e) { toast(friendlyError(e), 5000); }
+  }
+  async function disablePush() {
+    const sub = await currentPushSub();
+    if (sub) {
+      await sb.rpc('remove_push_subscription', { p_endpoint: sub.endpoint });
+      await sub.unsubscribe().catch(() => {});
+    }
+    await refreshPushStatus();
+    toast('Notifications are off for this device');
+  }
+  // Re-register on launch in case the browser renewed the subscription.
+  async function syncPush() {
+    try { const sub = await currentPushSub(); if (sub && Notification.permission === 'granted') await saveSub(sub); } catch { /* offline */ }
+    refreshPushStatus();
+  }
+  async function testPush(btn) {
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/push', { method: 'POST', headers: { Authorization: 'Bearer ' + state.session.access_token, 'Content-Type': 'application/json' }, body: JSON.stringify({ test: true }) });
+      const j = await res.json().catch(() => ({}));
+      if (res.status === 501) toast('The server is not set up for notifications yet. Ask the app admin.', 6000);
+      else if (!res.ok) toast(j.error || 'Could not send a test', 5000);
+      else toast(j.sent ? 'Test sent. It should appear in a few seconds.' : 'No devices to send to. Turn notifications on first.', 5000);
+    } catch { toast("Can't reach the server. Check your connection."); }
+    btn.disabled = false;
+  }
+  async function setNotifyPref(key, val) {
+    const args = { p_posts: null, p_replies: null, p_cover: null };
+    args[{ notify_posts: 'p_posts', notify_replies: 'p_replies', notify_cover: 'p_cover' }[key]] = val;
+    const { error } = await sb.rpc('update_my_notify', args);
+    if (error) { toast(friendlyError(error)); render(); return; }
+    state.profile[key] = val;
+    cacheSet('profile', state.profile);
+  }
+
+  function notificationsCard() {
+    const st = state.pushStatus;
+    const p = state.profile;
+    const parts = [];
+    if (st === 'needs-install') parts.push(h('p', { class: 'body-text' }, 'To get notifications on iPhone, add this app to your Home Screen (Share → Add to Home Screen), open it from there, and come back here.'));
+    else if (st === 'unsupported') parts.push(h('p', { class: 'body-text' }, "This browser can't receive notifications. Try Safari (iPhone, from the Home Screen app) or Chrome."));
+    else if (st === 'blocked') parts.push(h('p', { class: 'body-text' }, 'Notifications are blocked for this app. Turn them on in your phone settings (Settings → Notifications → Koinos Security), then reopen the app.'));
+    else if (st === 'off') parts.push(h('p', { class: 'body-text' }, 'Get a notification for new alerts, cover requests and board posts, even when the app is closed.'),
+      h('button', { class: 'btn primary block', onclick: enablePush }, 'Turn on notifications'));
+    else if (st === 'on') {
+      const pref = (key, label, hint) => {
+        const cb = h('input', { type: 'checkbox', id: 'pref_' + key });
+        cb.checked = p[key] !== false;
+        cb.addEventListener('change', () => setNotifyPref(key, cb.checked));
+        return h('div', { class: 'field check' }, h('label', { for: 'pref_' + key }, cb, label), hint ? h('div', { class: 'hint' }, hint) : null);
+      };
+      parts.push(h('p', { class: 'body-text' }, 'Notifications are on for this device. Alerts always notify you.'),
+        'notify_posts' in p ? [pref('notify_cover', 'Cover and swap requests'), pref('notify_posts', 'New board posts'), pref('notify_replies', 'Replies to threads you started or replied to')] : null,
+        h('div', { class: 'actions' },
+          h('button', { class: 'btn small', onclick: (e) => testPush(e.currentTarget) }, 'Send a test'),
+          h('button', { class: 'btn small', onclick: disablePush }, 'Turn off on this device')));
+    } else parts.push(h('p', { class: 'muted small' }, 'Checking…'));
+    return h('div', { class: 'card' }, parts);
+  }
+
+  // Gentle prompt on the board until this device has notifications on.
+  function pushNudge() {
+    if (state.pushStatus !== 'off' && state.pushStatus !== 'needs-install') return null;
+    if (state.pushNudgeHidden) return null;
+    return h('div', { class: 'notice row' },
+      h('div', { class: 'grow' }, state.pushStatus === 'off' ? 'Get notified about new posts and cover requests.' : 'Add the app to your Home Screen to get notifications.'),
+      state.pushStatus === 'off' ? h('button', { class: 'btn small primary', onclick: enablePush }, 'Turn on') : h('a', { class: 'btn small', href: '#/more' }, 'How'),
+      h('button', { class: 'icon-btn', 'aria-label': 'Dismiss', onclick: () => { state.pushNudgeHidden = true; render(); } }, icon('x')));
+  }
+
+  // ------------------------------------------------------------------
   // Update assignments: Sunday rotation by week of the month
   // ------------------------------------------------------------------
   const WEEK_LABELS = ['1st', '2nd', '3rd', '4th', '5th'];
@@ -1941,6 +2391,7 @@
             : h('p', { class: 'body-text' }, 'Open your browser menu (⋮) and choose "Install app" or "Add to Home screen".')));
     }
 
+    content.push(h('div', { class: 'section-title' }, 'Notifications'), notificationsCard());
     content.push(h('div', { class: 'section-title' }, 'App'));
     content.push(h('div', { class: 'list' },
       h('button', { class: 'list-item', onclick: changeMyPassword }, h('div', { class: 'grow title' }, 'Change password')),
@@ -2079,6 +2530,7 @@
         e.currentTarget.disabled = true;
         const { error } = await sb.rpc('set_user_role', { target: p.id, new_role: newRole });
         if (error) { toast(friendlyError(error)); e.currentTarget.disabled = false; return; }
+        if (p.role === 'pending') { notifyServer(); refreshTable('roster'); refreshTable('posts'); } // approval may auto-link + welcome
         await afterSave('profiles', `${p.full_name || p.email}: ${ROLE_LABELS[newRole]}`);
       }
     }, label);
@@ -2097,7 +2549,13 @@
     else if (!state.profile.full_name) view = nameView();
     else if (!isMember()) view = pendingView();
     else view = mainView();
+    const act = document.activeElement;
+    const keep = act && act.id && app.contains(act) ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
     app.replaceChildren(view);
+    if (keep) {
+      const el = document.getElementById(keep.id);
+      if (el) { el.focus({ preventScroll: true }); try { if (keep.a != null) el.setSelectionRange(keep.a, keep.b); } catch { /* not a text field */ } }
+    }
   }
 
   // ------------------------------------------------------------------
@@ -2114,6 +2572,8 @@
 
   async function boot() {
     state.lastSeenAlerts = Number(cacheGet('lastSeenAlerts')) || 0;
+    state.lastSeenBoard = Number(cacheGet('lastSeenBoard')) || 0;
+    if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'open' && e.data.hash) location.hash = e.data.hash; });
 
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});

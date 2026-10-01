@@ -1,0 +1,8 @@
+{
+  "name": "koinos-security",
+  "private": true,
+  "description": "Koinos Security PWA. The app itself has no build step; this file only lists the push-notification library used by netlify/functions/push.mjs.",
+  "dependencies": {
+    "web-push": "^3.6.7"
+  }
+}

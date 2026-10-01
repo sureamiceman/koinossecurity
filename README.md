@@ -3,6 +3,8 @@
 Progressive Web App (PWA) for the Koinos church security team. It installs on iPhone and Android from the browser, with no app store involved.
 
 - **Alerts**: safety bulletins and BOLOs with photos, priority (info / caution / urgent), optional expiry. New posts appear live on everyone's open app.
+- **Team board**: posts with replies and photos, live updates and an unread badge. Post types: general, *Ask for cover / offer a date to swap* (tied to one of your schedule posts: it marks it "Needs cover", and whoever taps *I'll cover* is put on the schedule automatically, with a note in the thread), and welcome posts (created automatically when an admin links a new member's account). Threads are deleted 90 days after the last reply; admins can **Pin** a thread to keep it or **Make SOP** to turn it into a procedure.
+- **Push notifications**: each person turns them on under *More → Notifications* (iPhone: the app must be on the Home Screen). Alerts always notify; cover requests, new posts and replies can each be switched off. Sent by `netlify/functions/push.mjs`.
 - **SOPs**: searchable procedures grouped by category, with one-step rollback to the previous version.
 - **Contacts**: every active team member from the roster appears automatically (tap to call, or open their card to text/email), plus other contacts admins add, such as police non-emergency, church staff or utilities.
 - **Schedule**: services/events with posts. Members volunteer for open posts, ask for cover, or cover for someone; admins assign people. List and month views, filters for Mine / Needs cover / any person.
@@ -22,8 +24,8 @@ Works offline with the last-loaded information (text only; photos need a connect
 | Role | Can do |
 |---|---|
 | Pending | Signed up, waiting for approval. Sees nothing. |
-| Member | View everything, call/text; volunteer/cover posts; edit their own name, phone and photo. |
-| Admin | Member + add/edit/delete bulletins, SOPs, contacts and roster; approve or remove members. |
+| Member | View everything, call/text; volunteer/cover posts; post and reply on the board (edit/delete their own); edit their own name, phone and photo. |
+| Admin | Member + add/edit/delete bulletins, SOPs, contacts and roster; approve or remove members; pin or delete any board post, Make SOP from a thread. |
 | Superuser | Admin + grant/revoke admin. Superuser itself is only granted in the Supabase SQL editor. |
 
 All permissions are enforced by the database (row-level security), not just hidden in the app.
@@ -34,6 +36,7 @@ All permissions are enforced by the database (row-level security), not just hidd
 - `supabase/schema.sql`: database tables, security rules, photo storage
 - `netlify.toml`: publish folder and security headers
 - `netlify/functions/calendar.mjs`: the calendar subscription endpoint (`/cal/<token>.ics`)
+- `netlify/functions/push.mjs`: sends push notifications (`/api/push`); `package.json` lists its one library (`web-push`)
 
 ## One-time setup
 
@@ -48,6 +51,16 @@ All permissions are enforced by the database (row-level security), not just hidd
    Refresh the app. Repeat for the other superusers after they create accounts.
 6. **Invite the team.** Share the site link. Each person creates an account, then an admin approves them under *More → Manage users*.
 7. **Link roster names to sign-ins.** Under *Team*, edit each person and pick their *App account* (it links automatically when the roster email matches their sign-in email). That powers *Mine*, volunteering and swaps.
+
+## Push notifications setup (one time)
+
+1. In Netlify: *Site configuration → Environment variables → Add a variable*, add both:
+   - `SUPABASE_SERVICE_ROLE_KEY`: from Supabase *Project Settings → API Keys* (the **service_role** key, or a **secret** key). It stays on the server; never put it in this repo or in `config.js`.
+   - `VAPID_PRIVATE_KEY`: the private half of the push key pair. The public half is `vapidPublicKey` in `public/config.js` and in `push.mjs`. To make a new pair: `npx web-push generate-vapid-keys`, then update all three places.
+2. *Deploys → Trigger deploy → Deploy site* so the function picks up the variables.
+3. In the app: *More → Notifications → Turn on notifications*, then *Send a test*.
+
+If the variables are missing, the app still works; it just doesn't send notifications, and *Send a test* says the server isn't set up.
 
 ## Passwords
 

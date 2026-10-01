@@ -1022,6 +1022,14 @@ begin
      set cover_requested = p_on,
          last_change = my_name || case when p_on then ' asked for cover' else ' no longer needs cover' end
    where id = p_shift;
+  -- Board post for the request (removed again if withdrawn before anyone replied).
+  if p_on then
+    perform public.ensure_swap_post(p_shift);
+  else
+    delete from public.posts p
+     where p.kind = 'swap' and p.shift_id = p_shift
+       and not exists (select 1 from public.post_replies r where r.post_id = p.id);
+  end if;
 end $$;
 
 create or replace function public.cover_shift(p_shift uuid) returns void
@@ -1048,6 +1056,10 @@ begin
      set roster_id = me, cover_requested = false,
          last_change = my_name || ' is covering for ' || coalesce(prev_name, 'someone')
    where id = p_shift;
+  -- Note it on the board thread (also lets the requester know).
+  insert into public.post_replies (post_id, author_id, body)
+  select p.id, auth.uid(), my_name || ' is covering this.'
+    from public.posts p where p.kind = 'swap' and p.shift_id = p_shift;
 end $$;
 
 revoke all on function public.volunteer_shift(uuid) from public, anon;
@@ -1152,6 +1164,263 @@ revoke all on public.profiles from anon, authenticated;
 grant select on public.profiles to authenticated;
 
 -- ---------------------------------------------------------------------
+-- Team board: posts with replies and photos. Swap/cover posts are tied to
+-- a schedule post (shift). Unpinned threads are removed 90 days after
+-- their last activity (see purge_board); admins can pin to keep them.
+-- ---------------------------------------------------------------------
+create table if not exists public.posts (
+  id                uuid primary key default gen_random_uuid(),
+  author_id         uuid default auth.uid() references public.profiles(id) on delete set null,
+  kind              text not null default 'general' check (kind in ('general','swap','intro')),
+  body              text not null default '',
+  photo_path        text,
+  shift_id          uuid references public.shifts(id) on delete set null,   -- swap: the post being offered
+  roster_id         uuid references public.roster(id) on delete set null,   -- intro: who is being welcomed
+  pinned            boolean not null default false,
+  edited_at         timestamptz,
+  last_activity_at  timestamptz not null default now(),
+  created_at        timestamptz not null default now(),
+  notified_at       timestamptz
+);
+create index if not exists posts_activity_idx on public.posts(last_activity_at desc);
+create unique index if not exists posts_swap_shift_key on public.posts(shift_id) where kind = 'swap' and shift_id is not null;
+
+create table if not exists public.post_replies (
+  id           uuid primary key default gen_random_uuid(),
+  post_id      uuid not null references public.posts(id) on delete cascade,
+  author_id    uuid default auth.uid() references public.profiles(id) on delete set null,
+  body         text not null default '',
+  photo_path   text,
+  edited_at    timestamptz,
+  created_at   timestamptz not null default now(),
+  notified_at  timestamptz
+);
+create index if not exists post_replies_post_idx on public.post_replies(post_id);
+
+alter table public.bulletins add column if not exists notified_at timestamptz;
+
+-- Keep authorship, kind and pinning honest; stamp edits.
+create or replace function public.posts_guard() returns trigger
+language plpgsql set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    new.created_at := now();
+    new.last_activity_at := now();
+    new.notified_at := null;
+    new.edited_at := null;
+    if not public.is_admin() then new.pinned := false; end if;
+  else
+    new.author_id := old.author_id;
+    new.kind := old.kind;
+    new.shift_id := old.shift_id;
+    new.roster_id := old.roster_id;
+    new.created_at := old.created_at;
+    if auth.uid() is not null and not public.is_admin() then new.pinned := old.pinned; end if;
+    if (new.body, new.photo_path) is distinct from (old.body, old.photo_path) then
+      new.edited_at := now();
+      new.last_activity_at := now();
+    end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists posts_guard on public.posts;
+create trigger posts_guard before insert or update on public.posts
+  for each row execute function public.posts_guard();
+
+create or replace function public.post_replies_guard() returns trigger
+language plpgsql set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    new.created_at := now();
+    new.notified_at := null;
+    new.edited_at := null;
+  else
+    new.post_id := old.post_id;
+    new.author_id := old.author_id;
+    new.created_at := old.created_at;
+    if (new.body, new.photo_path) is distinct from (old.body, old.photo_path) then new.edited_at := now(); end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists post_replies_guard on public.post_replies;
+create trigger post_replies_guard before insert or update on public.post_replies
+  for each row execute function public.post_replies_guard();
+
+-- A reply keeps its thread alive (resets the 90-day clock).
+create or replace function public.post_replies_bump() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  update public.posts set last_activity_at = now() where id = new.post_id;
+  return null;
+end $$;
+drop trigger if exists post_replies_bump on public.post_replies;
+create trigger post_replies_bump after insert on public.post_replies
+  for each row execute function public.post_replies_bump();
+
+alter table public.posts enable row level security;
+alter table public.post_replies enable row level security;
+drop policy if exists posts_select on public.posts;
+drop policy if exists posts_insert on public.posts;
+drop policy if exists posts_update on public.posts;
+drop policy if exists posts_delete on public.posts;
+create policy posts_select on public.posts for select to authenticated using (public.is_member());
+-- Swap posts linked to a schedule post are created through request_cover / create_swap_post.
+create policy posts_insert on public.posts for insert to authenticated
+  with check (public.is_member() and author_id = auth.uid() and (kind <> 'swap' or shift_id is null) and roster_id is null);
+create policy posts_update on public.posts for update to authenticated
+  using (public.is_member() and (author_id = auth.uid() or public.is_admin()));
+create policy posts_delete on public.posts for delete to authenticated
+  using (public.is_member() and (author_id = auth.uid() or public.is_admin()));
+drop policy if exists post_replies_select on public.post_replies;
+drop policy if exists post_replies_insert on public.post_replies;
+drop policy if exists post_replies_update on public.post_replies;
+drop policy if exists post_replies_delete on public.post_replies;
+create policy post_replies_select on public.post_replies for select to authenticated using (public.is_member());
+create policy post_replies_insert on public.post_replies for insert to authenticated
+  with check (public.is_member() and author_id = auth.uid());
+create policy post_replies_update on public.post_replies for update to authenticated
+  using (public.is_member() and author_id = auth.uid());
+create policy post_replies_delete on public.post_replies for delete to authenticated
+  using (public.is_member() and (author_id = auth.uid() or public.is_admin()));
+revoke all on public.posts, public.post_replies from anon, authenticated;
+grant select, insert, update, delete on public.posts, public.post_replies to authenticated;
+
+-- Create (or re-open) the board post for a cover request on a schedule post.
+create or replace function public.ensure_swap_post(p_shift uuid) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare
+  s    record;
+  body text;
+  pid  uuid;
+begin
+  select sh.post, e.title, coalesce(sh.starts_at, e.starts_at) as st into s
+    from public.shifts sh join public.events e on e.id = sh.event_id where sh.id = p_shift;
+  if not found then return null; end if;
+  body := 'Can anyone cover ' || coalesce(nullif(s.post, ''), 'my post') || ' at ' || s.title || ' on '
+          || to_char(s.st at time zone 'America/New_York', 'Dy Mon FMDD, FMHH12:MI AM') || '?';
+  insert into public.posts (author_id, kind, body, shift_id)
+  values (auth.uid(), 'swap', body, p_shift)
+  on conflict (shift_id) where kind = 'swap' and shift_id is not null
+  do update set author_id = excluded.author_id, body = excluded.body,
+                last_activity_at = now(), notified_at = null
+  returning id into pid;
+  return pid;
+end $$;
+revoke all on function public.ensure_swap_post(uuid) from public, anon, authenticated;
+
+-- Ask for cover from the board, with an optional message.
+create or replace function public.create_swap_post(p_shift uuid, p_body text) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare pid uuid;
+begin
+  perform public.request_cover(p_shift, true);
+  select id into pid from public.posts where kind = 'swap' and shift_id = p_shift;
+  if coalesce(trim(p_body), '') <> '' then
+    update public.posts set body = left(trim(p_body), 4000) where id = pid;
+  end if;
+  return pid;
+end $$;
+revoke all on function public.create_swap_post(uuid, text) from public, anon;
+grant execute on function public.create_swap_post(uuid, text) to authenticated;
+
+-- Welcome post when a roster entry is first linked to an app account.
+create or replace function public.roster_intro_post() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.profile_id is not null and new.active and auth.uid() is not null
+     and (tg_op = 'INSERT' or old.profile_id is null)
+     and not exists (select 1 from public.posts where kind = 'intro' and roster_id = new.id) then
+    insert into public.posts (author_id, kind, roster_id, body)
+    values (auth.uid(), 'intro', new.id,
+            'Please welcome ' || new.name || ' to the security team!'
+            || case when coalesce(new.position, '') <> '' then ' (' || new.position || ')' else '' end);
+  end if;
+  return null;
+end $$;
+drop trigger if exists roster_intro_post on public.roster;
+create trigger roster_intro_post after insert or update of profile_id on public.roster
+  for each row execute function public.roster_intro_post();
+
+-- Delete unpinned threads with no activity for 90 days. Returns the photo
+-- paths that were in use so the app can remove the files.
+create or replace function public.purge_board() returns text[]
+language plpgsql security definer set search_path = public as $$
+declare
+  paths text[];
+  ids   uuid[];
+begin
+  if not public.is_member() then return '{}'; end if;
+  select array_agg(id) into ids from public.posts
+   where not pinned and last_activity_at < now() - interval '90 days';
+  if ids is null then return '{}'; end if;
+  select array_agg(x) into paths from (
+    select photo_path x from public.posts where id = any(ids) and photo_path is not null
+    union all
+    select photo_path from public.post_replies where post_id = any(ids) and photo_path is not null) t;
+  delete from public.posts where id = any(ids);
+  return coalesce(paths, '{}');
+end $$;
+revoke all on function public.purge_board() from public, anon;
+grant execute on function public.purge_board() to authenticated;
+
+-- ---------------------------------------------------------------------
+-- Push notifications: one row per device that allowed notifications.
+-- Sent by the Netlify function netlify/functions/push.mjs.
+-- ---------------------------------------------------------------------
+create table if not exists public.push_subscriptions (
+  id           uuid primary key default gen_random_uuid(),
+  profile_id   uuid not null default auth.uid() references public.profiles(id) on delete cascade,
+  endpoint     text not null unique,
+  p256dh       text not null,
+  auth         text not null,
+  user_agent   text not null default '',
+  created_at   timestamptz not null default now()
+);
+alter table public.push_subscriptions enable row level security;
+drop policy if exists push_subscriptions_select on public.push_subscriptions;
+create policy push_subscriptions_select on public.push_subscriptions for select to authenticated
+  using (profile_id = auth.uid());
+revoke all on public.push_subscriptions from anon, authenticated;
+grant select on public.push_subscriptions to authenticated;
+
+alter table public.profiles add column if not exists notify_posts   boolean not null default true;
+alter table public.profiles add column if not exists notify_replies boolean not null default true;
+alter table public.profiles add column if not exists notify_cover   boolean not null default true;
+
+create or replace function public.save_push_subscription(p_endpoint text, p_p256dh text, p_auth text, p_ua text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_member() then raise exception 'Not authorized'; end if;
+  if coalesce(p_endpoint, '') !~ '^https://' then raise exception 'Invalid subscription'; end if;
+  delete from public.push_subscriptions where endpoint = p_endpoint;   -- device may have changed hands
+  insert into public.push_subscriptions (profile_id, endpoint, p256dh, auth, user_agent)
+  values (auth.uid(), p_endpoint, p_p256dh, p_auth, left(coalesce(p_ua, ''), 300));
+end $$;
+
+create or replace function public.remove_push_subscription(p_endpoint text) returns void
+language sql security definer set search_path = public as $$
+  delete from public.push_subscriptions where endpoint = p_endpoint and profile_id = auth.uid()
+$$;
+
+create or replace function public.update_my_notify(p_posts boolean, p_replies boolean, p_cover boolean) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'Not signed in'; end if;
+  update public.profiles
+     set notify_posts = coalesce(p_posts, notify_posts),
+         notify_replies = coalesce(p_replies, notify_replies),
+         notify_cover = coalesce(p_cover, notify_cover)
+   where id = auth.uid();
+end $$;
+
+revoke all on function public.save_push_subscription(text, text, text, text) from public, anon;
+revoke all on function public.remove_push_subscription(text) from public, anon;
+revoke all on function public.update_my_notify(boolean, boolean, boolean) from public, anon;
+grant execute on function public.save_push_subscription(text, text, text, text) to authenticated;
+grant execute on function public.remove_push_subscription(text) to authenticated;
+grant execute on function public.update_my_notify(boolean, boolean, boolean) to authenticated;
+
+-- ---------------------------------------------------------------------
 -- Photo storage (private bucket; members view, admins upload)
 -- ---------------------------------------------------------------------
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
@@ -1175,6 +1444,21 @@ create policy "photos_update" on storage.objects for update to authenticated
 create policy "photos_delete" on storage.objects for delete to authenticated
   using (bucket_id = 'photos' and public.is_admin());
 
+-- Board photos: members upload under board/<their id>/. Files can be removed by
+-- their owner, by admins, or by anyone once no post or reply uses them (cleanup).
+drop policy if exists "photos_board_insert" on storage.objects;
+drop policy if exists "photos_board_delete" on storage.objects;
+create policy "photos_board_insert" on storage.objects for insert to authenticated
+  with check (bucket_id = 'photos' and public.is_member()
+              and (storage.foldername(name))[1] = 'board'
+              and (storage.foldername(name))[2] = auth.uid()::text);
+create policy "photos_board_delete" on storage.objects for delete to authenticated
+  using (bucket_id = 'photos' and public.is_member()
+         and (storage.foldername(name))[1] = 'board'
+         and ((storage.foldername(name))[2] = auth.uid()::text
+              or (not exists (select 1 from public.posts p where p.photo_path = name)
+                  and not exists (select 1 from public.post_replies r where r.photo_path = name))));
+
 -- Members may upload and remove their own profile photo under self/<their id>/.
 drop policy if exists "photos_self_insert" on storage.objects;
 drop policy if exists "photos_self_delete" on storage.objects;
@@ -1193,7 +1477,7 @@ create policy "photos_self_delete" on storage.objects for delete to authenticate
 do $$
 declare t text;
 begin
-  foreach t in array array['bulletins','events','shifts'] loop
+  foreach t in array array['bulletins','events','shifts','posts','post_replies'] loop
     if not exists (
       select 1 from pg_publication_tables
       where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t
