@@ -960,6 +960,8 @@
   // Contacts
   // ------------------------------------------------------------------
   const callBtn = (phone, alt) => h('a', { class: 'call-btn' + (alt ? ' alt' : ''), href: telHref(phone) }, icon('phone'), alt ? 'Alt' : 'Call');
+  // Opens the phone's own messaging app, addressed to this number.
+  const textBtn = (phone) => h('a', { class: 'call-btn alt', href: smsHref(phone), 'aria-label': 'Text ' + phone }, icon('msg'), 'Text');
 
   // Contacts = everyone on the active team roster (automatic) + other contacts admins add.
   function contactsView() {
@@ -979,6 +981,7 @@
             isAdmin() ? h('button', { class: 'btn small', onclick: () => editContact(c) }, 'Edit') : null),
           h('div', { class: 'phones' },
             c.phone ? callBtn(c.phone) : null,
+            c.phone ? textBtn(c.phone) : null,
             c.alt_phone ? callBtn(c.alt_phone, true) : null)))));
     }
     if (team.length) {
@@ -991,7 +994,7 @@
               r.is_medical ? h('span', { class: 'badge medical inline' }, 'Medical') : null),
             r.position ? h('div', { class: 'sub' }, r.position) : null,
             h('div', { class: 'sub' }, r.phone || 'No phone listed')),
-          h('div', { class: 'phones' }, r.phone ? callBtn(r.phone) : null)))));
+          h('div', { class: 'phones' }, r.phone ? callBtn(r.phone) : null, r.phone ? textBtn(r.phone) : null)))));
       if (isAdmin()) content.push(h('p', { class: 'muted small' }, 'Team members come from the Team roster automatically. Edit them under Team.'));
     }
     return { title: 'Contacts', action: isAdmin() ? topAction('+ New', () => editContact()) : null, content };
