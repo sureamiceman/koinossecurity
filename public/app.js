@@ -1380,8 +1380,9 @@
     if (upcoming && me) {
       if (!s.roster_id) {
         actions.push(h('button', { class: 'btn small primary', onclick: () => shiftAction('volunteer_shift', { p_shift: s.id }, `Volunteer for ${s.post || 'this post'} at ${e.title}?` + ccwNote, "You're on the schedule — thanks!") }, 'Volunteer'));
-      } else if (mine && !s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => shiftAction('request_cover', { p_shift: s.id, p_on: true }, 'Ask the team to cover this post? You stay assigned until someone takes it.', 'Cover requested — the team can see it now') }, 'Need cover'));
-      else if (mine && s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => shiftAction('request_cover', { p_shift: s.id, p_on: false }, null, 'Cover request withdrawn') }, 'Cancel request'));
+      // One way to ask for cover: a board post tied to this shift (this is a shortcut to it).
+      } else if (mine && !s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => newPost('swap', s.id) }, 'Need cover'));
+      else if (mine && s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => openCoverPost(s) }, 'View request'));
       else if (s.cover_requested) {
         actions.push(h('button', { class: 'btn small primary', onclick: () => shiftAction('cover_shift', { p_shift: s.id }, `Cover ${rosterName(s.roster_id)}'s ${s.post || 'post'} at ${e.title}?` + ccwNote, "You're covering — thanks!") }, "I'll cover"));
       }
@@ -1934,11 +1935,18 @@
       .sort((a, b) => new Date(a.e.starts_at) - new Date(b.e.starts_at));
   }
 
-  function newPost(kind = 'general') {
+  // Opens the board thread for a shift's cover request (falls back to the board).
+  function openCoverPost(s) {
+    const p = state.data.posts.find((x) => x.kind === 'swap' && x.shift_id === s.id && !x.resolved_at);
+    location.hash = p ? '#/board/' + encodeURIComponent(p.id) : '#/board';
+  }
+
+  function newPost(kind = 'general', shiftId = '') {
     const mine = myCoverableShifts();
     openForm({
-      title: 'New post',
-      values: { kind },
+      title: kind === 'swap' ? 'Ask for cover' : 'New post',
+      intro: kind === 'swap' ? h('p', { class: 'muted small' }, "This posts your request on the team board and marks the post \"Needs cover\" on the schedule. You stay assigned until someone taps I'll cover.") : null,
+      values: { kind, shift: shiftId || (mine[0] && mine[0].s.id) || '' },
       fields: [
         { name: 'kind', label: 'Type', type: 'select', options: [['general', 'General post'], ['swap', 'Ask for cover / offer a date to swap'], ['intro', 'Introduce someone / say hello']] },
         { name: 'shift', label: 'Which of your posts?', type: 'select', visible: (v) => v.kind === 'swap',
@@ -1950,11 +1958,13 @@
       ],
       submitLabel: 'Post',
       onSubmit: async (v, photo) => {
+        let goTo = '#/board';
         if (v.kind === 'swap') {
           if (!v.shift) throw new Error('Pick one of your upcoming posts to offer.');
-          const { error } = await sb.rpc('create_swap_post', { p_shift: v.shift, p_body: v.body });
+          const { data: pid, error } = await sb.rpc('create_swap_post', { p_shift: v.shift, p_body: v.body });
           if (error) throw error;
           await refreshTable('shifts');
+          if (pid) goTo = '#/board/' + encodeURIComponent(pid);
         } else {
           if (!v.body && !photo.file) throw new Error('Write a message or add a photo.');
           const path = photo.file ? await uploadBoardPhoto(photo.file) : null;
@@ -1962,8 +1972,8 @@
           if (error) { removePhoto(path); throw error; }
         }
         notifyServer();
-        location.hash = '#/board';
-        await afterBoard('Posted');
+        location.hash = goTo;
+        await afterBoard(v.kind === 'swap' ? 'Cover request posted — the team has been notified' : 'Posted');
       }
     });
   }
