@@ -1730,8 +1730,9 @@
   function unseenBoard() {
     const me = state.profile && state.profile.id;
     const seen = state.lastSeenBoard || 0;
-    const posts = state.data.posts.filter((p) => p.author_id !== me && new Date(p.created_at).getTime() > seen).length;
-    const replies = state.data.post_replies.filter((r) => r.author_id !== me && new Date(r.created_at).getTime() > seen).length;
+    const posts = state.data.posts.filter((p) => !p.resolved_at && p.author_id !== me && new Date(p.created_at).getTime() > seen).length;
+    const live = new Set(state.data.posts.filter((p) => !p.resolved_at).map((p) => p.id));
+    const replies = state.data.post_replies.filter((r) => live.has(r.post_id) && r.author_id !== me && new Date(r.created_at).getTime() > seen).length;
     return posts + replies;
   }
 
@@ -1757,9 +1758,9 @@
     if (msg) toast(msg);
   }
 
-  // Remove old threads (any member's app does this, at most twice a day).
+  // Remove old threads and settled cover requests (any member's app, at most hourly).
   async function purgeBoard() {
-    if (!isMember() || Date.now() - (Number(cacheGet('boardPurgedAt')) || 0) < 12 * 3600 * 1000) return;
+    if (!isMember() || Date.now() - (Number(cacheGet('boardPurgedAt')) || 0) < 3600 * 1000) return;
     cacheSet('boardPurgedAt', Date.now());
     const { data, error } = await sb.rpc('purge_board');
     if (error || !data || !data.length) return;
@@ -1773,7 +1774,7 @@
     cacheSet('lastSeenBoard', state.lastSeenBoard);
     const f = state.boardFilter || 'all';
     const chip = (key, label) => h('button', { class: 'chip' + (f === key ? ' on' : ''), onclick: () => { state.boardFilter = key; render(); } }, label);
-    const all = state.data.posts.slice().sort((a, b) => (b.pinned - a.pinned) || (new Date(b.last_activity_at) - new Date(a.last_activity_at)));
+    const all = state.data.posts.filter((p) => !p.resolved_at).sort((a, b) => (b.pinned - a.pinned) || (new Date(b.last_activity_at) - new Date(a.last_activity_at)));
     const openCover = all.filter((p) => p.kind === 'swap' && swapState(p).open).length;
     const shown = f === 'swap' ? all.filter((p) => p.kind === 'swap') : f === 'pinned' ? all.filter((p) => p.pinned) : all;
     const content = [h('div', { class: 'chips' }, chip('all', 'All'), chip('swap', openCover ? `Cover & swaps (${openCover})` : 'Cover & swaps'), chip('pinned', 'Pinned'))];
@@ -1808,7 +1809,8 @@
     if (st.open && me && !mineReq && s.roster_id !== me.id) {
       const miss = s.requires_ccw && !ccwOkOn(me, e.starts_at);
       actions.push(h('button', { class: 'btn small primary', onclick: async () => {
-        await shiftAction('cover_shift', { p_shift: s.id }, `Cover ${s.post || 'this post'} at ${e.title}?` + (miss ? "\n\nThis post prefers a CCW-qualified person, and you aren't listed as CCW-qualified on this date. You can still take it; it will be flagged." : ''), "You're covering — thanks!");
+        await shiftAction('cover_shift', { p_shift: s.id }, `Cover ${s.post || 'this post'} at ${e.title}?` + (miss ? "\n\nThis post prefers a CCW-qualified person, and you aren't listed as CCW-qualified on this date. You can still take it; it will be flagged." : ''), "You're covering — thanks! The schedule is updated.");
+        if (location.hash.startsWith('#/board/')) location.hash = '#/board';
         await afterBoard();
       } }, "I'll cover"));
     }
@@ -1874,7 +1876,9 @@
     }
     if (canDeleteBoard(p)) tools.push(h('button', { class: 'btn small danger', onclick: () => deletePost(p) }, 'Delete'));
 
-    const content = [postCard(p, true)];
+    const content = [];
+    if (p.resolved_at) content.push(h('div', { class: 'notice' }, 'This request is settled and the schedule is updated, so it has been taken off the board. It will be deleted shortly.'));
+    content.push(postCard(p, true));
     if (tools.length) content.push(h('div', { class: 'actions thread-tools' }, tools));
     content.push(h('div', { class: 'section-title' }, replies.length ? `Replies (${replies.length})` : 'No replies yet'));
     content.push(h('div', { class: 'reply-list' }, replies.map((r) => h('div', { class: 'reply' },
@@ -1886,8 +1890,8 @@
         canEditBoard(r) || canDeleteBoard(r) ? h('div', { class: 'reply-tools' },
           canEditBoard(r) ? h('button', { class: 'linkish', onclick: () => editReply(r) }, 'Edit') : null,
           canDeleteBoard(r) ? h('button', { class: 'linkish danger-text', onclick: () => deleteReply(r) }, 'Delete') : null) : null)))));
-    content.push(replyComposer(p));
-    content.push(h('p', { class: 'muted tiny center' }, p.pinned ? 'Pinned by an admin: this thread is kept.' : `Removed on ${purgeDate(p).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })} unless someone replies or an admin pins it.`));
+    if (!p.resolved_at) content.push(replyComposer(p));
+    content.push(h('p', { class: 'muted tiny center' }, p.resolved_at ? '' : p.pinned ? 'Pinned by an admin: this thread is kept.' : `Removed on ${purgeDate(p).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })} unless someone replies or an admin pins it.`));
     return { title: KIND_LABELS[p.kind] === 'Post' ? 'Post' : KIND_LABELS[p.kind], back: '#/board', content };
   }
 

@@ -1183,6 +1183,9 @@ create table if not exists public.posts (
   notified_at       timestamptz
 );
 create index if not exists posts_activity_idx on public.posts(last_activity_at desc);
+-- Cover/swap posts are archived (hidden) as soon as the schedule no longer needs
+-- cover, then deleted by purge_board about an hour later.
+alter table public.posts add column if not exists resolved_at timestamptz;
 create unique index if not exists posts_swap_shift_key on public.posts(shift_id) where kind = 'swap' and shift_id is not null;
 
 create table if not exists public.post_replies (
@@ -1302,11 +1305,27 @@ begin
   values (auth.uid(), 'swap', body, p_shift)
   on conflict (shift_id) where kind = 'swap' and shift_id is not null
   do update set author_id = excluded.author_id, body = excluded.body,
-                last_activity_at = now(), notified_at = null
+                last_activity_at = now(), notified_at = null, resolved_at = null
   returning id into pid;
   return pid;
 end $$;
 revoke all on function public.ensure_swap_post(uuid) from public, anon, authenticated;
+
+-- When a post stops needing cover (someone covered it, an admin reassigned it,
+-- or the request was withdrawn), archive its board post.
+create or replace function public.shifts_resolve_swap() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if old.cover_requested and not new.cover_requested then
+    update public.posts set resolved_at = now()
+     where kind = 'swap' and shift_id = new.id and resolved_at is null;
+  end if;
+  return null;
+end $$;
+drop trigger if exists shifts_resolve_swap on public.shifts;
+-- (no column list: cover_requested is often cleared by another trigger, not the UPDATE itself)
+create trigger shifts_resolve_swap after update on public.shifts
+  for each row execute function public.shifts_resolve_swap();
 
 -- Ask for cover from the board, with an optional message.
 create or replace function public.create_swap_post(p_shift uuid, p_body text) returns uuid
@@ -1341,6 +1360,10 @@ drop trigger if exists roster_intro_post on public.roster;
 create trigger roster_intro_post after insert or update of profile_id on public.roster
   for each row execute function public.roster_intro_post();
 
+update public.posts p set resolved_at = now()
+  from public.shifts sh
+ where p.kind = 'swap' and p.shift_id = sh.id and not sh.cover_requested and p.resolved_at is null;
+
 -- Delete unpinned threads with no activity for 90 days. Returns the photo
 -- paths that were in use so the app can remove the files.
 create or replace function public.purge_board() returns text[]
@@ -1350,8 +1373,14 @@ declare
   ids   uuid[];
 begin
   if not public.is_member() then return '{}'; end if;
-  select array_agg(id) into ids from public.posts
-   where not pinned and last_activity_at < now() - interval '90 days';
+  select array_agg(id) into ids from public.posts p
+   where (not p.pinned and p.last_activity_at < now() - interval '90 days')
+      -- settled cover/swap requests (kept ~1 hour so the "covering" notice goes out)
+      or (p.kind = 'swap' and not p.pinned and (
+            p.resolved_at < now() - interval '1 hour'
+         or p.shift_id is null
+         or exists (select 1 from public.shifts sh join public.events e on e.id = sh.event_id
+                     where sh.id = p.shift_id and e.ends_at < now())));
   if ids is null then return '{}'; end if;
   select array_agg(x) into paths from (
     select photo_path x from public.posts where id = any(ids) and photo_path is not null

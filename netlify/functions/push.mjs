@@ -96,7 +96,7 @@ export async function claimNew(db, now = new Date()) {
   const stamp = { notified_at: now.toISOString() };
   const [bulletins, posts, replies] = await Promise.all([
     db.patch(`bulletins?notified_at=is.null&active=is.true&created_at=gte.${encodeURIComponent(since)}&select=id,kind,priority,title,body,created_by`, stamp),
-    db.patch(`posts?notified_at=is.null&last_activity_at=gte.${encodeURIComponent(since)}&select=id,kind,body,author_id,shift_id,photo_path`, stamp),
+    db.patch(`posts?notified_at=is.null&resolved_at=is.null&last_activity_at=gte.${encodeURIComponent(since)}&select=id,kind,body,author_id,shift_id,photo_path`, stamp),
     db.patch(`post_replies?notified_at=is.null&created_at=gte.${encodeURIComponent(since)}&select=id,post_id,body,author_id,photo_path`, stamp)
   ]);
   return { bulletins: bulletins || [], posts: posts || [], replies: replies || [] };
