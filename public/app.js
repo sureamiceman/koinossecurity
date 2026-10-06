@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [] });
   const state = {
     session: null,
     profile: null,
@@ -26,6 +26,7 @@
     photoUrlsAt: 0,
     showArchived: false,
     sopQuery: '',
+    sopTab: null,
     teamFilter: 'all',
     channel: null,
     installPrompt: null,
@@ -163,6 +164,7 @@
   const QUERIES = {
     bulletins: (t) => t.select('*').order('created_at', { ascending: false }),
     sops: (t) => t.select('*').order('category').order('sort_order').order('title'),
+    sop_categories: (t) => t.select('*').order('sort_order'),
     contacts: (t) => t.select('*').order('category').order('sort_order').order('name'),
     roster: (t) => t.select('*').order('sort_order').order('name'),
     profiles: (t) => t.select('*').order('full_name'),
@@ -182,7 +184,7 @@
     attendance_values: (t) => t.select('*, attendance_counts!inner(service_date)').gte('attendance_counts.service_date', attSince())
   };
   const attSince = () => isoDay(new Date(Date.now() - 200 * 864e5));
-  const OPTIONAL_TABLES = new Set(['attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
+  const OPTIONAL_TABLES = new Set(['sop_categories', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
 
   function loadCachedData() {
     for (const t of Object.keys(QUERIES)) {
@@ -196,7 +198,7 @@
     if (error) return error;
     if (t === 'shifts') for (const r of data) delete r.events;
     if (t === 'attendance_values') for (const r of data) delete r.attendance_counts;
-    if (OPTIONAL_TABLES.has(t)) state.attMissing = false;
+    if (t.startsWith('attendance')) state.attMissing = false;
     state.data[t] = data;
     cacheSet('data:' + t, data);
     return null;
@@ -209,7 +211,7 @@
     }
     const results = await Promise.all(Object.keys(QUERIES).map(async (t) => [t, await refreshTable(t)]));
     // Attendance tables missing = the database hasn't been updated yet; the rest of the app still works.
-    if (results.some(([t, e]) => e && OPTIONAL_TABLES.has(t) && /does not exist|schema cache|could not find/i.test(e.message || ''))) state.attMissing = true;
+    if (results.some(([t, e]) => e && t.startsWith('attendance') && /does not exist|schema cache|could not find/i.test(e.message || ''))) state.attMissing = true;
     const errors = results.filter(([t, e]) => e && !OPTIONAL_TABLES.has(t)).map(([, e]) => e);
     if (!errors.length) retryAttendanceEmails();
     if (!errors.length) await purgeBoard().catch(() => {});
@@ -882,32 +884,150 @@
   }
   const categoriesOf = (rows) => [...new Set(rows.map((r) => r.category).filter(Boolean))];
 
+  // SOP tabs (rolodex): the admin-ordered, colored categories, plus a gray tab
+  // for any category an SOP uses that isn't one of them (shouldn't happen
+  // once tabs are set up, but nothing ever goes missing).
+  const SOP_COLORS = [['red', 'Red'], ['orange', 'Orange'], ['yellow', 'Yellow'], ['green', 'Green'], ['teal', 'Teal'], ['blue', 'Blue'], ['purple', 'Purple'], ['pink', 'Pink'], ['gray', 'Gray']];
+  const tabKey = (t) => (t.id ? 'id:' + t.id : 'name:' + t.name);
+  function sopTabs() {
+    const tabs = state.data.sop_categories.slice().sort((a, b) => a.sort_order - b.sort_order)
+      .map((c) => ({ id: c.id, name: c.name, color: c.color }));
+    for (const n of categoriesOf(state.data.sops)) if (!tabs.some((t) => t.name === n)) tabs.push({ name: n, color: 'gray' });
+    if (!tabs.length) tabs.push({ name: 'General', color: 'green' });
+    return tabs;
+  }
+  function currentSopTab() {
+    const tabs = sopTabs();
+    return tabs.find((t) => tabKey(t) === state.sopTab) || tabs[0];
+  }
+  const sopTabOf = (name) => sopTabs().find((t) => t.name === name) || { name, color: 'gray' };
+  const sopSort = (a, b) => (a.sort_order - b.sort_order) || a.title.localeCompare(b.title);
+
   function sopsView(id) {
     if (id) return sopDetailView(id);
-    const search = h('input', { class: 'search', type: 'search', placeholder: 'Search SOPs', 'aria-label': 'Search SOPs' });
+    const search = h('input', { class: 'search', type: 'search', placeholder: 'Search all SOPs', 'aria-label': 'Search all SOPs' });
     search.value = state.sopQuery;
-    const listWrap = h('div', {});
-    const draw = () => listWrap.replaceChildren(...sopList(state.sopQuery));
+    const wrap = h('div', {});
+    const draw = () => wrap.replaceChildren(rolodex(search, draw));
     search.addEventListener('input', () => { state.sopQuery = search.value; draw(); });
     draw();
-    return { title: 'SOPs', action: isAdmin() ? topAction('+ New', () => editSop()) : null, content: [search, listWrap] };
+    return { title: 'SOPs', action: isAdmin() ? topAction('+ New', () => editSop(null, { category: currentSopTab().name })) : null, content: [search, wrap] };
   }
 
-  function sopList(q) {
-    const ql = q.trim().toLowerCase();
-    const rows = state.data.sops.filter((s) => !ql || `${s.title} ${s.category} ${s.body}`.toLowerCase().includes(ql));
-    if (!rows.length) return [empty(state.data.sops.length ? 'No SOPs match your search' : 'No SOPs yet', 'book')];
-    const out = [];
-    for (const [cat, items] of groupBy(rows, 'category')) {
-      out.push(h('div', { class: 'section-title' }, cat));
-      out.push(h('div', { class: 'list' }, items.map((s) =>
-        h('a', { class: 'list-item', href: '#/sops/' + encodeURIComponent(s.id) },
-          h('div', { class: 'grow' },
-            h('div', { class: 'title' }, s.title),
-            h('div', { class: 'sub' }, (s.body || '').split('\n').find((l) => l.trim()) || '')),
-          icon('chev')))));
+  function rolodex(search, draw) {
+    const tabs = sopTabs();
+    const cur = currentSopTab();
+    const ql = state.sopQuery.trim().toLowerCase();
+    const searching = !!ql;
+    const count = (t) => state.data.sops.filter((s) => s.category === t.name).length;
+
+    const rail = h('nav', { class: 'sop-rail', 'aria-label': 'SOP categories' }, tabs.map((t) => h('button', {
+      type: 'button',
+      class: `sop-tab tc-${t.color}` + (!searching && tabKey(t) === tabKey(cur) ? ' on' : ''),
+      'aria-pressed': !searching && tabKey(t) === tabKey(cur) ? 'true' : 'false',
+      title: `${t.name} (${count(t)})`,
+      onclick: () => {
+        state.sopTab = tabKey(t);
+        cacheSet('sopTab', state.sopTab);
+        if (state.sopQuery) { state.sopQuery = ''; search.value = ''; }
+        draw();
+      }
+    }, h('span', {}, t.name))));
+
+    let panel;
+    if (searching) {
+      const rows = state.data.sops.filter((s) => `${s.title} ${s.category} ${s.body}`.toLowerCase().includes(ql))
+        .sort((a, b) => (tabs.findIndex((t) => t.name === a.category) - tabs.findIndex((t) => t.name === b.category)) || sopSort(a, b));
+      panel = h('section', { class: 'sop-panel tc-search' },
+        h('div', { class: 'sop-panel-head' }, h('h2', {}, 'Search results'), h('span', { class: 'muted small' }, `${rows.length} found in all tabs`)),
+        rows.length ? h('div', { class: 'sop-items' }, rows.map((s) => sopItem(s, true)))
+          : h('div', { class: 'sop-empty' }, state.data.sops.length ? 'No SOPs match your search.' : 'No SOPs yet.',
+            isAdmin() ? h('div', { class: 'actions' }, h('button', { class: 'btn small primary', onclick: () => editSop(null, { category: cur.name, title: state.sopQuery.trim() }) }, '+ New SOP')) : null));
+    } else {
+      const rows = state.data.sops.filter((s) => s.category === cur.name).sort(sopSort);
+      panel = h('section', { class: `sop-panel tc-${cur.color}` },
+        h('div', { class: 'sop-panel-head' }, h('h2', {}, cur.name), h('span', { class: 'muted small' }, rows.length === 1 ? '1 SOP' : `${rows.length} SOPs`)),
+        rows.length ? h('div', { class: 'sop-items' }, rows.map((s) => sopItem(s, false)))
+          : h('div', { class: 'sop-empty' }, `No SOPs in ${cur.name} yet.`),
+        isAdmin() ? h('div', { class: 'sop-panel-foot' }, h('button', { class: 'btn small', onclick: editSopTabs }, 'Edit tabs')) : null);
     }
-    return out;
+    return h('div', { class: 'rolodex' }, panel, rail);
+  }
+
+  function sopItem(s, showTab) {
+    const t = sopTabOf(s.category);
+    return h('a', { class: 'sop-item', href: '#/sops/' + encodeURIComponent(s.id) },
+      h('div', { class: 'grow' },
+        showTab ? h('span', { class: `sop-chip tc-${t.color}` }, t.name) : null,
+        h('div', { class: 'title' }, s.title),
+        h('div', { class: 'sub' }, (s.body || '').split('\n').find((l) => l.trim()) || '')),
+      icon('chev'));
+  }
+
+  // Admins: name, color and order the tabs.
+  function editSopTabs() {
+    const rows = sopTabs().map((t) => ({ id: t.id || null, name: t.name, color: t.color, k: Math.random().toString(36).slice(2) }));
+    const list = h('div', { class: 'tab-editor' });
+    const draw = () => {
+      list.replaceChildren(...rows.map((r, i) => {
+        const n = state.data.sops.filter((s) => s.category === r.name && r.id).length;
+        const name = h('input', { type: 'text', class: 'input', value: r.name, maxlength: 40, placeholder: 'Tab name', 'aria-label': 'Tab name', id: 'te_' + r.k });
+        name.addEventListener('input', () => { r.name = name.value; });
+        const palette = h('div', { class: 'te-palette' + (r.open ? '' : ' hidden'), role: 'group', 'aria-label': 'Tab color' },
+          SOP_COLORS.map(([c, label]) => h('button', {
+            type: 'button', class: `te-swatch tc-${c}` + (r.color === c ? ' on' : ''), title: label, 'aria-label': label,
+            'aria-pressed': r.color === c ? 'true' : 'false',
+            onclick: () => { r.color = c; r.open = false; draw(); }
+          })));
+        return h('div', { class: 'te-row' },
+          h('div', { class: 'te-line' },
+            h('span', { class: 'te-num' }, i),
+            h('button', { type: 'button', class: `te-swatch tc-${r.color} on`, 'aria-label': 'Change color', title: 'Change color', onclick: () => { r.open = !r.open; draw(); } }),
+            name,
+            h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Move up', disabled: i === 0 || null, onclick: () => { [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); } }, '↑'),
+            h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Move down', disabled: i === rows.length - 1 || null, onclick: () => { [rows[i + 1], rows[i]] = [rows[i], rows[i + 1]]; draw(); } }, '↓'),
+            h('button', {
+              type: 'button', class: 'icon-btn mini', 'aria-label': 'Remove tab', onclick: () => {
+                if (rows.length === 1) { toast('Keep at least one tab.'); return; }
+                const dest = rows.find((x) => x !== r);
+                if (n && !confirm(`${n} SOP${n > 1 ? 's' : ''} in "${r.name}" will move to "${dest.name}" (the first tab) when you save. Remove the tab?`)) return;
+                rows.splice(i, 1); draw();
+              }
+            }, icon('x'))),
+          palette);
+      }));
+    };
+    draw();
+    openDialog({
+      title: 'Edit SOP tabs',
+      body: [
+        h('p', { class: 'muted small dlg-intro' }, 'Tabs show top to bottom in this order (0 is first). Tap the color dot to change a tab\'s color. Renaming a tab renames it on its SOPs.'),
+        list,
+        h('button', { type: 'button', class: 'btn small', onclick: () => { const r = { id: null, name: '', color: 'gray', k: Math.random().toString(36).slice(2) }; rows.push(r); draw(); const el = document.getElementById('te_' + r.k); if (el) el.focus(); } }, '+ Add tab')
+      ],
+      buttons: (close) => [
+        h('button', { class: 'btn', onclick: close }, 'Cancel'),
+        h('button', {
+          class: 'btn primary', onclick: async (e) => {
+            const btn = e.currentTarget;
+            const clean = rows.map((r) => ({ id: r.id, name: r.name.trim(), color: r.color }));
+            if (clean.some((r) => !r.name)) { toast('Every tab needs a name.'); return; }
+            btn.disabled = true;
+            const { error } = await sb.rpc('save_sop_categories', { p: clean });
+            if (error) { toast(friendlyError(error), 6000); btn.disabled = false; return; }
+            // Stay on the same tab even if it was renamed (tabs are remembered by id).
+            const cur = currentSopTab();
+            if (!cur.id) { const same = clean.find((r) => r.name === cur.name && !r.id); if (!same) state.sopTab = null; }
+            close();
+            await Promise.all([refreshTable('sop_categories'), refreshTable('sops')]);
+            if (!state.sopTab || !sopTabs().some((t) => tabKey(t) === state.sopTab)) state.sopTab = tabKey(sopTabs()[0]);
+            cacheSet('sopTab', state.sopTab);
+            render();
+            toast('Tabs saved');
+          }
+        }, 'Save')
+      ]
+    });
   }
 
   function sopDetailView(id) {
@@ -918,7 +1038,8 @@
       title: s.category || 'SOP',
       back: '#/sops',
       action: isAdmin() ? topAction('Edit', () => editSop(s)) : null,
-      content: h('article', { class: 'card sop-detail' },
+      content: h('article', { class: `card sop-detail tc-${sopTabOf(s.category).color}` },
+        h('span', { class: `sop-chip tc-${sopTabOf(s.category).color}` }, s.category || 'General'),
         h('h2', {}, s.title),
         h('div', { class: 'meta' }, `Updated ${fmtDateTime(s.updated_at)}${who ? ' by ' + who : ''}`),
         h('div', { class: 'body-text' }, s.body || ''),
@@ -954,22 +1075,24 @@
     });
   }
 
-  function editSop(s, prefill) {
+  function editSop(s, prefill, fromThread) {
     const isNew = !s;
     s = s || {};
     openForm({
       title: isNew ? 'New SOP' : 'Edit SOP',
-      intro: prefill ? h('p', { class: 'muted small' }, 'Started from a board thread. Tidy it up, then save. The thread itself is not changed.') : null,
+      intro: fromThread ? h('p', { class: 'muted small' }, 'Started from a board thread. Tidy it up, then save. The thread itself is not changed.') : null,
       values: isNew && prefill ? prefill : s,
       fields: [
         { name: 'title', label: 'Title', required: true, placeholder: 'e.g. Medical emergency response' },
-        { name: 'category', label: 'Category', required: true, default: 'General', list: categoriesOf(state.data.sops), hint: 'Pick an existing category or type a new one.' },
+        { name: 'category', label: 'Tab', type: 'select', options: sopTabs().map((t) => [t.name, t.name]), default: currentSopTab().name,
+          hint: isNew ? 'Starts in the tab you were looking at. Change it if this belongs somewhere else.' : null },
         { name: 'body', label: 'Procedure', type: 'textarea', rows: 14, placeholder: '1. First step\n2. Second step\n…' },
         { name: 'sort_order', label: 'Sort order', type: 'number', default: 0, inputmode: 'numeric', hint: 'Lower numbers appear first within the category.' }
       ],
       onSubmit: async (v) => {
         await saveRow('sops', s.id, v);
-        await afterSave('sops', isNew ? (prefill ? 'SOP created from the thread' : 'SOP added') : 'SOP saved');
+        if (isNew) { const t = sopTabOf(v.category); state.sopTab = tabKey(t); cacheSet('sopTab', state.sopTab); }
+        await afterSave('sops', isNew ? (fromThread ? 'SOP created from the thread' : 'SOP added') : 'SOP saved');
       },
       onDelete: isNew ? null : async () => {
         await deleteRow('sops', s.id);
@@ -2067,7 +2190,7 @@
     const firstLine = (p.body.split('\n').find((l) => l.trim()) || 'New procedure').trim();
     const replies = repliesOf(p.id).filter((r) => r.body);
     const body = [p.body.trim(), ...replies.map((r) => `${authorName(r.author_id)}: ${r.body.trim()}`)].filter(Boolean).join('\n\n');
-    editSop(null, { title: firstLine.length > 80 ? firstLine.slice(0, 79) + '…' : firstLine, category: 'General', body });
+    editSop(null, { title: firstLine.length > 80 ? firstLine.slice(0, 79) + '…' : firstLine, category: currentSopTab().name, body }, true);
   }
 
   // ------------------------------------------------------------------
@@ -3368,6 +3491,7 @@
   async function boot() {
     state.lastSeenAlerts = Number(cacheGet('lastSeenAlerts')) || 0;
     state.lastSeenBoard = Number(cacheGet('lastSeenBoard')) || 0;
+    state.sopTab = cacheGet('sopTab');
     if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'open' && e.data.hash) location.hash = e.data.hash; });
 
     if ('serviceWorker' in navigator) {

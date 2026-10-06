@@ -211,7 +211,11 @@ create table if not exists public.sops (
 create or replace function public.sops_keep_previous() returns trigger
 language plpgsql set search_path = public as $$
 begin
-  if tg_op = 'INSERT' then
+  if tg_op = 'UPDATE' and current_setting('koinos.sop_retag', true) = 'on' then
+    -- A tab rename/removal moved this SOP; that isn't an edit.
+    new.prev_title := old.prev_title; new.prev_category := old.prev_category; new.prev_body := old.prev_body;
+    new.prev_updated_at := old.prev_updated_at; new.prev_updated_by := old.prev_updated_by;
+  elsif tg_op = 'INSERT' then
     new.prev_title := null; new.prev_category := null; new.prev_body := null;
     new.prev_updated_at := null; new.prev_updated_by := null;
   elsif (new.title, new.category, new.body) is distinct from (old.title, old.category, old.body) then
@@ -236,6 +240,97 @@ create trigger sops_stamp before insert or update on public.sops
 drop trigger if exists sops_previous on public.sops;
 create trigger sops_previous before insert or update on public.sops
   for each row execute function public.sops_keep_previous();
+
+-- Runs after sops_stamp (triggers fire in name order): a tab move keeps the
+-- SOP's own "updated" date and person.
+create or replace function public.sops_retag() returns trigger
+language plpgsql set search_path = public as $$
+begin
+  if current_setting('koinos.sop_retag', true) = 'on' then
+    new.updated_at := old.updated_at;
+    new.updated_by := old.updated_by;
+  end if;
+  return new;
+end $$;
+drop trigger if exists sops_zz_retag on public.sops;
+create trigger sops_zz_retag before update on public.sops
+  for each row execute function public.sops_retag();
+
+-- SOP tabs: the categories shown as colored tabs on the SOPs screen, in
+-- the admins' chosen order. SOPs refer to their tab by name, so renaming a
+-- tab renames it on its SOPs too (done by save_sop_categories).
+create table if not exists public.sop_categories (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null unique,
+  color       text not null default 'gray'
+              check (color in ('red','orange','yellow','green','teal','blue','purple','pink','gray')),
+  sort_order  int  not null default 0
+);
+
+-- First run: start from the paper plan, plus any categories SOPs already use.
+do $$
+begin
+  if not exists (select 1 from public.sop_categories) then
+    insert into public.sop_categories (name, color, sort_order) values
+      ('Emergency', 'red', 0), ('Medical', 'orange', 1), ('General', 'green', 2), ('Facilities', 'blue', 3);
+  end if;
+  insert into public.sop_categories (name, color, sort_order)
+  select c, 'gray', 100 + row_number() over (order by c)
+    from (select distinct category c from public.sops where category <> '') x
+  on conflict (name) do nothing;
+end $$;
+
+-- Admins: save every tab at once, in order. p = [{id?, name, color}, …]
+-- A renamed tab renames its SOPs; SOPs on a removed tab move to the first
+-- tab. Moving SOPs this way doesn't count as editing them: their "previous
+-- version" and "updated by" stay as they were (see sops_retag below).
+create or replace function public.save_sop_categories(p jsonb) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  t jsonb; i int := 0; t_id uuid; new_name text; first_name text;
+  keep uuid[] := '{}'; names text[] := '{}';
+begin
+  if not public.is_admin() then raise exception 'Not authorized'; end if;
+  if jsonb_typeof(p) <> 'array' or jsonb_array_length(p) = 0 then raise exception 'Keep at least one tab.'; end if;
+  for t in select * from jsonb_array_elements(p) loop
+    new_name := trim(coalesce(t->>'name', ''));
+    if new_name = '' then raise exception 'Every tab needs a name.'; end if;
+    if new_name like '~%' then raise exception 'Tab names can''t start with ~.'; end if;
+    if length(new_name) > 40 then raise exception 'Tab names can be at most 40 characters.'; end if;
+    if lower(new_name) = any(names) then raise exception 'Two tabs are both named "%".', new_name; end if;
+    if coalesce(t->>'color', 'gray') not in ('red','orange','yellow','green','teal','blue','purple','pink','gray') then
+      raise exception 'Unknown color "%".', t->>'color';
+    end if;
+    names := names || lower(new_name);
+  end loop;
+
+  perform set_config('koinos.sop_retag', 'on', true);
+  -- 1. Point SOPs at their tab's id (not its name) while names change, so
+  --    two tabs can even swap names.
+  update public.sops s set category = '~' || c.id::text from public.sop_categories c where s.category = c.name;
+  update public.sop_categories set name = '~' || id::text where true;
+  -- 2. Save the tabs in order.
+  for t in select * from jsonb_array_elements(p) loop
+    t_id := nullif(t->>'id', '')::uuid;
+    new_name := trim(t->>'name');
+    if t_id is not null and exists (select 1 from public.sop_categories where id = t_id) then
+      update public.sop_categories set name = new_name, color = coalesce(t->>'color', 'gray'), sort_order = i where id = t_id;
+    else
+      insert into public.sop_categories (name, color, sort_order) values (new_name, coalesce(t->>'color', 'gray'), i) returning id into t_id;
+    end if;
+    if i = 0 then first_name := new_name; end if;
+    keep := keep || t_id;
+    i := i + 1;
+  end loop;
+  -- 3. SOPs follow their tab's (new) name; removed tabs' SOPs go to the first tab.
+  update public.sops s set category = c.name from public.sop_categories c
+   where s.category = '~' || c.id::text and c.id = any(keep);
+  delete from public.sop_categories where not (id = any(keep));
+  update public.sops set category = first_name where category like '~%';
+  perform set_config('koinos.sop_retag', 'off', true);
+end $$;
+revoke all on function public.save_sop_categories(jsonb) from public, anon;
+grant execute on function public.save_sop_categories(jsonb) to authenticated;
 
 -- ---------------------------------------------------------------------
 -- Emergency contacts
@@ -1145,7 +1240,7 @@ grant execute on function public.calendar_feed(text) to anon, authenticated;
 do $$
 declare t text;
 begin
-  foreach t in array array['sops','contacts','bulletins','roster','events','shifts','event_series','series_posts','rotation_slots'] loop
+  foreach t in array array['sops','sop_categories','contacts','bulletins','roster','events','shifts','event_series','series_posts','rotation_slots'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('drop policy if exists %I on public.%I', t || '_select', t);
     execute format('drop policy if exists %I on public.%I', t || '_insert', t);
