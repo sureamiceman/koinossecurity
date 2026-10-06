@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [] });
   const state = {
     session: null,
     profile: null,
@@ -29,7 +29,9 @@
     teamFilter: 'all',
     channel: null,
     installPrompt: null,
-    lastSeenAlerts: 0
+    lastSeenAlerts: 0,
+    att: { weeks: 8, drafts: {}, timer: null, inflight: null, correcting: null, setup: null, setupDirty: false, emailTried: {} },
+    attMissing: false
   };
 
   const ROLE_LABELS = { pending: 'Pending approval', member: 'Member', admin: 'Admin', superuser: 'Superuser' };
@@ -71,7 +73,8 @@
     msg: ['M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'],
     mail: ['M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z', 'M22 6l-10 7L2 6'],
     shield: ['M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'],
-    calendar: ['M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z', 'M16 2v4', 'M8 2v4', 'M3 10h18']
+    calendar: ['M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z', 'M16 2v4', 'M8 2v4', 'M3 10h18'],
+    clipboard: ['M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2', 'M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z', 'M9 12h6', 'M9 16h4']
   };
   function icon(name) {
     const NS = 'http://www.w3.org/2000/svg';
@@ -105,6 +108,7 @@
     if (/failed to fetch|networkerror|load failed/i.test(msg)) return "Can't reach the server. Check your connection and try again.";
     if (/token has expired|otp.*(invalid|expired)|invalid.*token/i.test(msg)) return "That code didn't work or has expired. Check it or send a new one.";
     if (/row-level security|permission denied|not authorized/i.test(msg)) return "You don't have permission to do that.";
+    if (/attendance_values_value_check|invalid input syntax for type (numeric|integer)/i.test(msg)) return 'Counts must be whole numbers (0 or more).';
     return msg;
   }
 
@@ -169,8 +173,16 @@
     series_posts: (t) => t.select('*').order('sort_order'),
     rotation_slots: (t) => t.select('*'),
     posts: (t) => t.select('*').order('last_activity_at', { ascending: false }),
-    post_replies: (t) => t.select('*').order('created_at')
+    post_replies: (t) => t.select('*').order('created_at'),
+    // Attendance: optional until the database has been updated (see OPTIONAL_TABLES).
+    attendance_settings: (t) => t.select('*'),
+    attendance_sections: (t) => t.select('*').order('sort_order'),
+    attendance_fields: (t) => t.select('*').order('sort_order'),
+    attendance_counts: (t) => t.select('*').gte('service_date', attSince()).order('service_date', { ascending: false }),
+    attendance_values: (t) => t.select('*, attendance_counts!inner(service_date)').gte('attendance_counts.service_date', attSince())
   };
+  const attSince = () => isoDay(new Date(Date.now() - 200 * 864e5));
+  const OPTIONAL_TABLES = new Set(['attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
 
   function loadCachedData() {
     for (const t of Object.keys(QUERIES)) {
@@ -183,6 +195,8 @@
     const { data, error } = await QUERIES[t](sb.from(t));
     if (error) return error;
     if (t === 'shifts') for (const r of data) delete r.events;
+    if (t === 'attendance_values') for (const r of data) delete r.attendance_counts;
+    if (OPTIONAL_TABLES.has(t)) state.attMissing = false;
     state.data[t] = data;
     cacheSet('data:' + t, data);
     return null;
@@ -193,7 +207,11 @@
       state.extendedAt = Date.now();
       try { await sb.rpc('extend_series'); } catch { /* offline */ }
     }
-    const errors = (await Promise.all(Object.keys(QUERIES).map(refreshTable))).filter(Boolean);
+    const results = await Promise.all(Object.keys(QUERIES).map(async (t) => [t, await refreshTable(t)]));
+    // Attendance tables missing = the database hasn't been updated yet; the rest of the app still works.
+    if (results.some(([t, e]) => e && OPTIONAL_TABLES.has(t) && /does not exist|schema cache|could not find/i.test(e.message || ''))) state.attMissing = true;
+    const errors = results.filter(([t, e]) => e && !OPTIONAL_TABLES.has(t)).map(([, e]) => e);
+    if (!errors.length) retryAttendanceEmails();
     if (!errors.length) await purgeBoard().catch(() => {});
     await resolvePhotos();
     render();
@@ -243,6 +261,10 @@
       .on('postgres_changes', { event: '*', schema: 'public', table: 'post_replies' }, () => {
         clearTimeout(state.boardTimer);
         state.boardTimer = setTimeout(async () => { await Promise.all([refreshTable('posts'), refreshTable('post_replies')]); await resolvePhotos(); render(); }, 400);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance_counts' }, () => {
+        clearTimeout(state.attTimer);
+        state.attTimer = setTimeout(async () => { await Promise.all([refreshTable('attendance_counts'), refreshTable('attendance_values')]); render(); }, 400);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => {
         clearTimeout(state.eventsTimer);
@@ -714,6 +736,7 @@
     ['alerts', 'Alerts', 'bell'],
     ['schedule', 'Schedule', 'calendar'],
     ['board', 'Board', 'msg'],
+    ['attendance', 'Count', 'clipboard'],
     ['sops', 'SOPs', 'book'],
     ['contacts', 'Contacts', 'phone'],
     ['team', 'Team', 'users'],
@@ -721,7 +744,7 @@
   ];
   function route() {
     const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
-    return [parts[0] || 'alerts', parts[1] ? decodeURIComponent(parts[1]) : null];
+    return [parts[0] || 'alerts', parts[1] ? decodeURIComponent(parts[1]) : null, parts[2] ? decodeURIComponent(parts[2]) : null];
   }
   const topAction = (label, fn) => h('button', { class: 'top-action', onclick: fn }, label);
   function empty(text, ic) { return h('div', { class: 'empty' }, ic ? icon(ic) : null, h('div', {}, text)); }
@@ -730,11 +753,12 @@
   const pendingCount = () => state.data.profiles.filter((p) => p.role === 'pending').length;
 
   function mainView() {
-    let [tab, id] = route();
+    let [tab, id, sub] = route();
     if ((tab === 'users' || tab === 'assignments') && !isAdmin()) tab = 'more';
-    const views = { alerts: alertsView, schedule: scheduleView, board: boardView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView, assignments: assignmentsView };
-    const v = (views[tab] || alertsView)(id);
-    const activeTab = tab === 'users' ? 'more' : tab === 'assignments' ? 'schedule' : (views[tab] ? tab : 'alerts');
+    if (tab === 'attendance-setup' && !isAdmin()) tab = 'attendance';
+    const views = { alerts: alertsView, schedule: scheduleView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView };
+    const v = (views[tab] || alertsView)(id, sub);
+    const activeTab = tab === 'users' ? 'more' : tab === 'assignments' ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : (views[tab] ? tab : 'alerts');
 
     if (activeTab === 'alerts') {
       state.lastSeenAlerts = Date.now();
@@ -751,7 +775,7 @@
       navigator.onLine ? null : h('div', { class: 'offline-bar' }, 'Offline — showing saved information'),
       h('main', {}, v.content),
       h('nav', { class: 'tabbar', 'aria-label': 'Main' }, TABS.map(([key, label, ic]) => {
-        const count = key === 'alerts' ? alertCount : key === 'more' ? moreCount : key === 'schedule' ? coverCount() : key === 'board' && activeTab !== 'board' ? unseenBoard() : 0;
+        const count = key === 'alerts' ? alertCount : key === 'more' ? moreCount : key === 'schedule' ? coverCount() : key === 'board' && activeTab !== 'board' ? unseenBoard() : key === 'attendance' ? openCountsCount() : 0;
         return h('a', { href: '#/' + key, class: activeTab === key ? 'active' : null, 'aria-current': activeTab === key ? 'page' : null },
           icon(ic), label, count ? h('span', { class: 'dot' }, count > 9 ? '9+' : count) : null);
       })));
@@ -2365,6 +2389,756 @@
   }
 
   // ------------------------------------------------------------------
+  // Attendance count: the weekly "Worship Service Count", one per service,
+  // emailed to the church secretary by netlify/functions/attendance-email.mjs.
+  //   #/attendance                 list of Sundays
+  //   #/attendance/<date>          that date's services: Start / Resume / Submitted
+  //   #/attendance/<date>/<no>     the count form for one service
+  //   #/attendance-setup           admins: sections, services, email, export
+  // ------------------------------------------------------------------
+  const DEFAULT_SERVICES = [{ no: 1, label: 'First Service', time: '09:00' }, { no: 2, label: 'Second Service', time: '10:45' }];
+  function isoDay(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
+  const parseDay = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+  const validDay = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s || '') && isoDay(parseDay(s)) === s;
+  const todayIso = () => isoDay(new Date());
+  const attDay = (s, opts) => parseDay(s).toLocaleDateString([], opts || { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
+  function fmtClock(t) {
+    if (!/^\d{1,2}:\d{2}/.test(t || '')) return '';
+    const [hh, mm] = t.split(':').map(Number);
+    return `${(hh % 12) || 12}:${pad2(mm)} ${hh < 12 ? 'am' : 'pm'}`;
+  }
+  const letter = (i) => String.fromCharCode(65 + (i % 26));
+  const attSettings = () => state.data.attendance_settings[0] || { services: DEFAULT_SERVICES, recipients: [], email_when: 'each', reply_to: '' };
+  const attServices = () => { const s = attSettings().services; return Array.isArray(s) && s.length ? s : DEFAULT_SERVICES; };
+  const attCount = (day, no) => state.data.attendance_counts.find((c) => c.service_date === day && c.service_no === no);
+  const attCountById = (id) => state.data.attendance_counts.find((c) => c.id === id);
+  const attValues = (countId) => state.data.attendance_values.filter((v) => v.count_id === countId).sort((a, b) => a.sort_order - b.sort_order);
+  const openCountsCount = () => {
+    const weekAgo = isoDay(new Date(Date.now() - 7 * 864e5));
+    return state.data.attendance_counts.filter((c) => c.status === 'open' && c.service_date >= weekAgo).length;
+  };
+  const canDiscard = (c) => c.status === 'open' && (isAdmin() || c.started_by === state.profile.id);
+
+  // The services shown for a date: the current list, plus any service already
+  // counted on that date that has since been removed from the form.
+  function servicesFor(day) {
+    const list = attServices().map((s) => ({ ...s }));
+    for (const c of state.data.attendance_counts) {
+      if (c.service_date === day && !list.some((s) => s.no === c.service_no)) list.push({ no: c.service_no, label: c.service_label || `Service ${c.service_no}`, time: '' });
+    }
+    return list;
+  }
+  const serviceName = (day, no) => { const s = servicesFor(day).find((x) => x.no === no); return s ? s.label : `Service ${no}`; };
+
+  // Recent Sundays (newest first) plus any other date that has a count.
+  function attDates() {
+    const today = parseDay(todayIso());
+    const lastSunday = new Date(today);
+    lastSunday.setDate(today.getDate() - today.getDay());
+    const days = new Set();
+    for (let i = 0; i < state.att.weeks; i++) {
+      const d = new Date(lastSunday);
+      d.setDate(lastSunday.getDate() - 7 * i);
+      days.add(isoDay(d));
+    }
+    const oldest = [...days].sort()[0];
+    for (const c of state.data.attendance_counts) if (c.service_date >= oldest) days.add(c.service_date);
+    return [...days].sort().reverse();
+  }
+
+  function emailStatus(c) {
+    const pendingFor = c.updated_at ? Date.now() - new Date(c.updated_at).getTime() : 0;
+    switch (c.email_state) {
+      case 'sent': return { text: `Emailed to the secretary ${relTime(c.emailed_at)}`, cls: 'ok' };
+      case 'sending': return { text: 'Sending email…' };
+      case 'pending': return pendingFor > 90000 ? { text: 'Email not sent yet', cls: 'bad', retry: 'send' } : { text: 'Sending email…' };
+      case 'waiting': return { text: 'Will be emailed once every service for this date is submitted', retry: isAdmin() ? 'now' : null };
+      case 'failed': return { text: 'Email not sent: ' + (c.email_error || 'unknown problem'), cls: 'bad', retry: (isAdmin() || c.submitted_by === state.profile.id) ? 'resend' : null };
+      default: return null;
+    }
+  }
+
+  // ---- Views ----
+  function attendanceView(id, sub) {
+    if (state.attMissing) {
+      return {
+        title: 'Attendance Count',
+        content: [h('div', { class: 'notice' }, 'Attendance needs a one-time database update. An admin needs to run supabase/schema.sql again in the Supabase SQL editor.')]
+      };
+    }
+    if (id && validDay(id) && sub && /^\d+$/.test(sub)) return attendanceCountView(id, Number(sub));
+    if (id && validDay(id)) return attendanceDayView(id);
+    return attendanceListView();
+  }
+
+  function attendanceListView() {
+    const content = [];
+    const st = attSettings();
+    if (isAdmin() && !(st.recipients || []).length) {
+      content.push(h('a', { class: 'notice block-link', href: '#/attendance-setup' }, 'No email address is set for the secretary yet, so submitted counts won\'t be emailed. Tap to set it up.'));
+    }
+    const today = todayIso();
+    content.push(h('div', { class: 'list' }, attDates().map((day) => {
+      const d = parseDay(day);
+      const parts = servicesFor(day).map((s) => {
+        const c = attCount(day, s.no);
+        const short = s.label.replace(/\s*service\s*/i, '') || s.label;
+        if (!c) return null;
+        return c.status === 'submitted' ? `${short}: ${c.total} ✓` : `${short}: in progress`;
+      }).filter(Boolean);
+      const done = servicesFor(day).every((s) => { const c = attCount(day, s.no); return c && c.status === 'submitted'; });
+      const total = servicesFor(day).reduce((n, s) => { const c = attCount(day, s.no); return n + (c && c.status === 'submitted' ? c.total : 0); }, 0);
+      return h('a', { class: 'list-item', href: '#/attendance/' + day },
+        h('div', { class: 'date-pill' + (day === today ? ' today' : '') },
+          h('div', { class: 'dp-dow' }, d.toLocaleDateString([], { weekday: 'short' })),
+          h('div', { class: 'dp-day' }, d.getDate())),
+        h('div', { class: 'grow' },
+          h('div', { class: 'title' }, attDay(day, { month: 'long', day: 'numeric', year: 'numeric' }), day === today ? h('span', { class: 'badge inline' }, 'Today') : null),
+          h('div', { class: 'sub' }, parts.length ? parts.join(' · ') : (day > today ? 'Upcoming' : 'Not started'))),
+        done ? h('span', { class: 'badge ok-badge' }, total) : null,
+        icon('chev'));
+    })));
+    content.push(h('div', { class: 'actions' },
+      h('button', { class: 'btn small', onclick: () => { state.att.weeks += 8; render(); } }, 'Show older Sundays'),
+      h('button', { class: 'btn small', onclick: pickOtherDate }, 'Count a different date')));
+    return { title: 'Attendance Count', action: isAdmin() ? topAction('Set up', () => { location.hash = '#/attendance-setup'; }) : null, content };
+  }
+
+  function pickOtherDate() {
+    openForm({
+      title: 'Count a different date',
+      intro: h('p', { class: 'body-text dlg-intro' }, 'For a special service on a day other than Sunday.'),
+      fields: [{ name: 'day', label: 'Date', type: 'date', required: true, default: todayIso() }],
+      submitLabel: 'Open',
+      onSubmit: async (v) => {
+        if (!validDay(v.day)) throw new Error('Pick a date.');
+        if (v.day > todayIso()) throw new Error("That date hasn't happened yet.");
+        location.hash = '#/attendance/' + v.day;
+      }
+    });
+  }
+
+  function attendanceDayView(day) {
+    const content = [];
+    const future = day > todayIso();
+    let dayTotal = 0, submitted = 0;
+    const services = servicesFor(day);
+    if (future) content.push(h('div', { class: 'notice' }, 'This date hasn\'t happened yet. You can start the count on the day.'));
+    for (const s of services) {
+      const c = attCount(day, s.no);
+      const go = () => { location.hash = `#/attendance/${day}/${s.no}`; };
+      let badge, lines = [], btn;
+      if (!c) {
+        badge = h('span', { class: 'badge muted-badge' }, 'Not started');
+        btn = future ? null : h('button', { class: 'btn primary block', onclick: (e) => startCount(day, s.no, e.currentTarget) }, 'Start Count');
+      } else if (c.status === 'open') {
+        const vals = attValues(c.id);
+        badge = h('span', { class: 'badge caution' }, 'In progress');
+        lines.push(`Started by ${nameOf(c.started_by) || 'someone'} ${relTime(c.started_at)}`);
+        lines.push(`${vals.filter((v) => v.value != null).length} of ${vals.length} lines filled · total so far ${c.total}`);
+        btn = h('button', { class: 'btn primary block', onclick: go }, 'Resume Count');
+      } else {
+        dayTotal += c.total;
+        submitted++;
+        badge = h('span', { class: 'badge ok-badge' }, 'Submitted');
+        lines.push(`Total ${c.total} · submitted by ${nameOf(c.submitted_by) || 'someone'}, ${fmtDateTime(c.submitted_at)}`);
+        if (c.corrections) lines.push(`Corrected by ${nameOf(c.corrected_by) || 'an admin'}, ${fmtDateTime(c.corrected_at)}`);
+        const em = emailStatus(c);
+        if (em) lines.push(h('span', { class: em.cls === 'bad' ? 'error-text' : em.cls === 'ok' ? 'ok-text' : '' }, em.text));
+        btn = h('button', { class: 'btn block submitted-btn', onclick: go }, '✓ Submitted Count');
+      }
+      content.push(h('div', { class: 'card att-service' },
+        h('div', { class: 'row' },
+          h('div', { class: 'grow' }, h('h3', {}, s.label), s.time ? h('div', { class: 'muted small' }, fmtClock(s.time)) : null),
+          badge),
+        lines.length ? h('div', { class: 'att-lines' }, lines.map((l) => h('div', { class: 'meta' }, l))) : null,
+        btn ? h('div', { class: 'actions' }, btn) : null));
+    }
+    if (submitted) {
+      content.push(h('div', { class: 'card att-day-total' },
+        h('div', { class: 'grow' }, 'Total count for this date', submitted < services.length ? h('div', { class: 'muted small' }, `${submitted} of ${services.length} services submitted`) : null),
+        h('strong', {}, dayTotal)));
+    }
+    return { title: attDay(day, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }), back: '#/attendance', content };
+  }
+
+  async function startCount(day, no, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+    const { error } = await sb.rpc('attendance_save', { p_date: day, p_service: no, p_values: {}, p_notes: null, p_submit: false, p_email: true });
+    await Promise.all([refreshTable('attendance_counts'), refreshTable('attendance_values')]);
+    if (error) { toast(friendlyError(error), 5000); render(); return; }
+    location.hash = `#/attendance/${day}/${no}`;
+    render();
+  }
+
+  // The lines to show. Open counts follow the current form; a submitted count
+  // shows exactly the lines it was counted with.
+  function countGroups(c) {
+    const stored = new Map(attValues(c.id).map((v) => [v.field_key, v]));
+    if (c.status === 'open') {
+      const groups = state.data.attendance_sections.slice().sort((a, b) => a.sort_order - b.sort_order).map((s) => ({
+        title: s.title,
+        fields: state.data.attendance_fields.filter((f) => f.section_id === s.id).sort((a, b) => a.sort_order - b.sort_order)
+          .map((f) => ({ key: f.id, label: f.label, in_total: f.in_total, value: stored.has(f.id) ? stored.get(f.id).value : null }))
+      })).filter((g) => g.fields.length);
+      if (groups.length) return groups;
+    }
+    const groups = [];
+    for (const v of stored.values()) {
+      let g = groups[groups.length - 1];
+      if (!g || g.title !== v.section_title) groups.push(g = { title: v.section_title, fields: [] });
+      g.fields.push({ key: v.field_key, label: v.field_label, in_total: v.in_total, value: v.value });
+    }
+    return groups;
+  }
+
+  function draftFor(c) {
+    let d = state.att.drafts[c.id];
+    if (!d) {
+      d = cacheGet('attDraft:' + c.id) || {};
+      d = state.att.drafts[c.id] = { values: d.values || {}, notes: d.notesDirty ? d.notes : c.notes, notesDirty: !!d.notesDirty };
+    }
+    if (!d.notesDirty) d.notes = c.notes || '';
+    return d;
+  }
+  const saveDraftCache = (id) => {
+    const d = state.att.drafts[id];
+    if (d && (Object.keys(d.values).length || d.notesDirty)) cacheSet('attDraft:' + id, d);
+    else try { localStorage.removeItem(CP + 'attDraft:' + id); } catch { /* ignore */ }
+  };
+  const clearDraft = (id) => { delete state.att.drafts[id]; saveDraftCache(id); };
+  const shownValue = (d, f) => (f.key in d.values ? d.values[f.key] : (f.value == null ? '' : String(f.value)));
+
+  function computeTotals(c) {
+    const d = draftFor(c);
+    let total = 0, filled = 0, lines = 0;
+    for (const g of countGroups(c)) for (const f of g.fields) {
+      const v = shownValue(d, f);
+      lines++;
+      if (v !== '') filled++;
+      if (f.in_total) total += Number(v) || 0;
+    }
+    return { total, filled, lines };
+  }
+
+  function setSaveStatus(text, bad) {
+    const el = document.getElementById('att_status');
+    state.att.status = { text, bad };
+    if (el) { el.textContent = text; el.classList.toggle('bad', !!bad); }
+  }
+  function updateTotalsDom(c) {
+    const t = computeTotals(c);
+    const el = document.getElementById('att_total');
+    if (el) el.textContent = t.total;
+    const f = document.getElementById('att_filled');
+    if (f) f.textContent = `${t.filled} of ${t.lines} lines filled`;
+  }
+
+  function attendanceCountView(day, no) {
+    const back = `#/attendance/${day}`;
+    const label = serviceName(day, no);
+    const title = `${label} · ${attDay(day, { month: 'short', day: 'numeric' })}`;
+    const c = attCount(day, no);
+    if (!c) {
+      const future = day > todayIso();
+      return {
+        title, back, content: [h('div', { class: 'card' },
+          h('p', { class: 'body-text' }, future ? "This date hasn't happened yet." : 'Nobody has started this count yet.'),
+          future ? null : h('div', { class: 'actions' }, h('button', { class: 'btn primary block', onclick: (e) => startCount(day, no, e.currentTarget) }, 'Start Count')))]
+      };
+    }
+    const correcting = c.status === 'submitted' && isAdmin() && state.att.correcting === c.id;
+    if (c.status === 'submitted' && !correcting) return { title, back, content: submittedCountView(c) };
+    return { title, back, content: countForm(c, correcting) };
+  }
+
+  function countForm(c, correcting) {
+    const d = draftFor(c);
+    const groups = countGroups(c);
+    const content = [];
+    if (correcting) content.push(h('div', { class: 'notice' }, 'You are correcting a submitted count. Nothing changes until you tap Save correction.'));
+    else content.push(h('p', { class: 'muted small att-intro' }, `Started by ${nameOf(c.started_by) || 'someone'}. Numbers save automatically, so anyone on the team can pick this up. Tap Submit when every area is counted.`));
+
+    groups.forEach((g, gi) => {
+      content.push(h('div', { class: 'card att-section' },
+        h('h3', {}, `${letter(gi)}. ${g.title}`),
+        g.fields.map((f, fi) => {
+          const id = 'att_' + f.key;
+          const input = h('input', {
+            id, type: 'text', inputmode: 'numeric', pattern: '[0-9]*', autocomplete: 'off', class: 'att-input',
+            value: shownValue(d, f), placeholder: '–', 'aria-label': `${g.title}: ${f.label}`,
+            oninput: (e) => {
+              const clean = e.target.value.replace(/\D/g, '').replace(/^0+(?=\d)/, '').slice(0, 6);
+              if (clean !== e.target.value) e.target.value = clean;
+              setVal(c, f.key, clean, correcting);
+            }
+          });
+          const step = (n) => () => {
+            const cur = Number(input.value) || 0;
+            const next = Math.max(0, cur + n);
+            input.value = String(next);
+            setVal(c, f.key, input.value, correcting);
+          };
+          return h('div', { class: 'att-line' },
+            h('label', { for: id, class: 'grow' }, g.fields.length > 1 ? `${fi + 1}. ${f.label}` : f.label,
+              f.in_total ? null : h('span', { class: 'muted tiny' }, ' (not in total)')),
+            h('div', { class: 'stepper' },
+              h('button', { type: 'button', class: 'step', 'aria-label': `One less: ${f.label}`, onclick: step(-1) }, '−'),
+              input,
+              h('button', { type: 'button', class: 'step', 'aria-label': `One more: ${f.label}`, onclick: step(1) }, '+')));
+        })));
+    });
+
+    const notes = h('textarea', { id: 'att_notes', rows: 3, placeholder: 'Anything the secretary should know (optional)' });
+    notes.value = d.notes || '';
+    notes.addEventListener('input', () => {
+      d.notes = notes.value;
+      d.notesDirty = true;
+      saveDraftCache(c.id);
+      if (!correcting) scheduleSave(c.id);
+    });
+    content.push(h('div', { class: 'field' }, h('label', { for: 'att_notes' }, 'Notes'), notes));
+
+    if (!correcting && canDiscard(c)) {
+      content.push(h('button', { class: 'btn small danger', onclick: () => discardCount(c) }, 'Discard this count'));
+    }
+
+    const t = computeTotals(c);
+    const status = state.att.status && state.att.statusFor === c.id ? state.att.status : { text: Object.keys(d.values).length ? 'Not saved yet' : 'Saved' };
+    state.att.statusFor = c.id;
+    const emailBox = correcting ? h('input', { type: 'checkbox', id: 'att_email', checked: true }) : null;
+    content.push(h('div', { class: 'att-bar' },
+      h('div', { class: 'att-bar-in' + (correcting ? ' correcting' : '') },
+        h('div', { class: 'grow' },
+          h('div', { class: 'att-total-line' }, 'Service total ', h('strong', { id: 'att_total' }, t.total)),
+          h('div', { class: 'muted tiny' }, h('span', { id: 'att_filled' }, `${t.filled} of ${t.lines} lines filled`),
+            correcting ? null : [' · ', h('span', { id: 'att_status', class: status.bad ? 'bad' : '' }, status.text)])),
+        correcting
+          ? h('div', { class: 'att-bar-actions' },
+            h('label', { class: 'att-email-check' }, emailBox, 'Email it'),
+            h('button', { class: 'btn small', onclick: () => { state.att.correcting = null; clearDraft(c.id); render(); } }, 'Cancel'),
+            h('button', { class: 'btn small primary', onclick: (e) => saveCorrection(c, emailBox.checked, e.currentTarget) }, 'Save correction'))
+          : h('button', { class: 'btn primary', onclick: () => confirmSubmit(c) }, 'Submit'))));
+    return content;
+  }
+
+  function setVal(c, key, value, correcting) {
+    const d = draftFor(c);
+    d.values[key] = value;
+    saveDraftCache(c.id);
+    updateTotalsDom(c);
+    if (!correcting) { setSaveStatus('Not saved yet'); scheduleSave(c.id); }
+  }
+
+  function scheduleSave(countId) {
+    clearTimeout(state.att.timer);
+    state.att.timer = setTimeout(() => { flushSave(countId).catch(() => {}); }, 900);
+  }
+
+  // Sends this phone's changes. Only changed lines are sent, so two people
+  // filling in different areas of the same count don't overwrite each other.
+  async function flushSave(countId, { submit = false, email = true } = {}) {
+    clearTimeout(state.att.timer);
+    while (state.att.inflight) await state.att.inflight;
+    const c = attCountById(countId);
+    if (!c) throw new Error('This count was removed.');
+    const d = draftFor(c);
+    const sent = { ...d.values };
+    const notes = d.notesDirty ? d.notes : null;
+    if (!submit && !Object.keys(sent).length && notes == null) { setSaveStatus('Saved'); return c; }
+    if (!navigator.onLine) { setSaveStatus('Offline — kept on this phone until you reconnect', true); throw new Error("You're offline. Your numbers are kept on this phone; try again when you're connected."); }
+    setSaveStatus('Saving…');
+    const payload = {};
+    for (const [k, v] of Object.entries(sent)) payload[k] = v === '' ? null : Number(v);
+    const job = (async () => {
+      const { data, error } = await sb.rpc('attendance_save', {
+        p_date: c.service_date, p_service: c.service_no, p_values: payload, p_notes: notes, p_submit: submit, p_email: email
+      });
+      if (error) throw error;
+      const row = Array.isArray(data) ? data[0] : data;
+      if (row) state.data.attendance_counts = state.data.attendance_counts.map((x) => (x.id === row.id ? row : x));
+      for (const v of state.data.attendance_values) if (v.count_id === countId && v.field_key in payload) v.value = payload[v.field_key];
+      for (const [k, v] of Object.entries(sent)) if (d.values[k] === v) delete d.values[k];
+      if (notes != null && d.notes === notes) d.notesDirty = false;
+      saveDraftCache(countId);
+      return row;
+    })();
+    state.att.inflight = job.then(() => {}, () => {}).finally(() => { state.att.inflight = null; });
+    try {
+      const row = await job;
+      setSaveStatus('Saved');
+      return row;
+    } catch (e) {
+      setSaveStatus('Not saved: ' + friendlyError(e), true);
+      if (/already submitted|removed/i.test(e.message || '')) {
+        // Someone else submitted (or discarded) it meanwhile: show what's there now.
+        toast(friendlyError(e), 7000);
+        clearDraft(countId);
+        await Promise.all([refreshTable('attendance_counts'), refreshTable('attendance_values')]);
+        render();
+      }
+      throw e;
+    }
+  }
+
+  function confirmSubmit(c) {
+    const t = computeTotals(c);
+    const blank = t.lines - t.filled;
+    const st = attSettings();
+    const emailing = (st.recipients || []).length
+      ? (st.email_when === 'day' ? 'It will be emailed to the secretary once every service for this date is submitted.' : 'It will be emailed to the secretary.')
+      : 'No secretary email is set up yet, so it will be saved but not emailed.';
+    openDialog({
+      title: `Submit ${serviceName(c.service_date, c.service_no)}?`,
+      body: [
+        h('div', { class: 'att-confirm-total' }, h('div', { class: 'muted small' }, 'Service total'), h('strong', {}, t.total)),
+        blank ? h('p', { class: 'notice' }, `${blank} line${blank > 1 ? 's are' : ' is'} blank and will count as 0.`) : null,
+        h('p', { class: 'body-text' }, emailing),
+        h('p', { class: 'muted small' }, 'After submitting, only an admin can change it.')
+      ],
+      buttons: (close) => [
+        h('button', { class: 'btn', onclick: close }, 'Keep counting'),
+        h('button', { class: 'btn primary', onclick: async (e) => { e.currentTarget.disabled = true; close(); await submitCount(c); } }, 'Submit')
+      ]
+    });
+  }
+
+  async function submitCount(c) {
+    try {
+      await flushSave(c.id, { submit: true });
+    } catch (e) {
+      toast(friendlyError(e), 6000);
+      await Promise.all([refreshTable('attendance_counts'), refreshTable('attendance_values')]);
+      render();
+      return;
+    }
+    clearDraft(c.id);
+    location.hash = '#/attendance/' + c.service_date;
+    toast('Submitted. Sending to the secretary…', 4000);
+    const res = await attEmail(c.id);
+    toast(emailToast(res), 6000);
+  }
+
+  function emailToast(res) {
+    if (res.state === 'sent') return 'Submitted and emailed to the secretary';
+    if (res.state === 'waiting') return 'Submitted. It will be emailed once every service for this date is in.';
+    if (res.state === 'no_recipients') return 'Submitted. No secretary email is set up yet, so nothing was emailed.';
+    if (res.state === 'offline') return 'Submitted. The email will go out when the app is back online.';
+    return 'Submitted, but the email didn\'t go out' + (res.error ? `: ${res.error}` : '') + '. An admin can resend it.';
+  }
+
+  async function attEmail(countId, sendNow) {
+    let out;
+    try {
+      const res = await fetch('/api/attendance-email', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + state.session.access_token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count_id: countId, send_now: !!sendNow })
+      });
+      out = await res.json().catch(() => ({}));
+      if (!res.ok && !out.state) out = { state: 'failed', error: out.error || `server error ${res.status}` };
+    } catch {
+      out = { state: 'offline' };
+    }
+    await refreshTable('attendance_counts');
+    render();
+    return out;
+  }
+
+  // An email that never went out (phone lost signal right after submitting): try again on the next refresh.
+  function retryAttendanceEmails() {
+    if (!state.profile || !navigator.onLine) return;
+    for (const c of state.data.attendance_counts) {
+      if (c.status !== 'submitted' || c.email_state !== 'pending' || state.att.emailTried[c.id]) continue;
+      if (Date.now() - new Date(c.updated_at).getTime() < 60000) continue;
+      state.att.emailTried[c.id] = true;
+      attEmail(c.id);
+    }
+  }
+
+  async function discardCount(c) {
+    if (!confirm('Discard this count? The numbers entered so far will be deleted.')) return;
+    clearTimeout(state.att.timer);
+    const { error } = await sb.from('attendance_counts').delete().eq('id', c.id);
+    if (error) { toast(friendlyError(error)); return; }
+    clearDraft(c.id);
+    await Promise.all([refreshTable('attendance_counts'), refreshTable('attendance_values')]);
+    location.hash = '#/attendance/' + c.service_date;
+    toast('Count discarded');
+  }
+
+  async function saveCorrection(c, email, btn) {
+    btn.disabled = true;
+    try {
+      await flushSave(c.id, { submit: true, email });
+    } catch (e) { toast(friendlyError(e), 6000); btn.disabled = false; return; }
+    state.att.correcting = null;
+    clearDraft(c.id);
+    await refreshTable('attendance_values');
+    render();
+    if (!email) { toast('Correction saved'); return; }
+    toast('Correction saved. Sending…');
+    const res = await attEmail(c.id, true);
+    toast(res.state === 'sent' ? 'Correction saved and emailed' : emailToast(res).replace(/^Submitted/, 'Correction saved'), 6000);
+  }
+
+  function submittedCountView(c) {
+    const groups = countGroups(c);
+    const em = emailStatus(c);
+    const content = [
+      h('div', { class: 'card att-summary' },
+        h('div', { class: 'row' },
+          h('div', { class: 'grow' }, h('div', { class: 'muted small' }, 'Service total'), h('div', { class: 'att-big' }, c.total)),
+          h('span', { class: 'badge ok-badge' }, 'Submitted')),
+        h('div', { class: 'meta' }, `Submitted by ${nameOf(c.submitted_by) || 'someone'}, ${fmtDateTime(c.submitted_at)}`),
+        c.corrections ? h('div', { class: 'meta' }, `Corrected by ${nameOf(c.corrected_by) || 'an admin'}, ${fmtDateTime(c.corrected_at)}`) : null,
+        em ? h('div', { class: 'meta ' + (em.cls === 'bad' ? 'error-text' : em.cls === 'ok' ? 'ok-text' : '') }, em.text) : null,
+        em && em.retry ? h('div', { class: 'actions' }, h('button', { class: 'btn small', onclick: (e) => retryEmail(c, em.retry, e.currentTarget) }, em.retry === 'now' ? 'Send now' : 'Try again')) : null)
+    ];
+    groups.forEach((g, gi) => {
+      content.push(h('div', { class: 'card att-section' },
+        h('h3', {}, `${letter(gi)}. ${g.title}`),
+        g.fields.map((f, fi) => h('div', { class: 'att-line' },
+          h('div', { class: 'grow' }, g.fields.length > 1 ? `${fi + 1}. ${f.label}` : f.label, f.in_total ? null : h('span', { class: 'muted tiny' }, ' (not in total)')),
+          h('strong', { class: 'att-value' }, f.value == null ? '–' : f.value)))));
+    });
+    if (c.notes) content.push(h('div', { class: 'card' }, h('div', { class: 'muted small' }, 'Notes'), h('p', { class: 'body-text' }, c.notes)));
+    if (isAdmin()) {
+      content.push(h('div', { class: 'actions' },
+        h('button', { class: 'btn', onclick: () => { state.att.correcting = c.id; clearDraft(c.id); render(); } }, 'Correct count'),
+        c.email_state === 'sent' ? h('button', { class: 'btn', onclick: (e) => retryEmail(c, 'resend', e.currentTarget) }, 'Resend email') : null,
+        h('button', { class: 'btn danger', onclick: () => deleteCount(c) }, 'Delete')));
+    }
+    return content;
+  }
+
+  async function retryEmail(c, kind, btn) {
+    if (btn) btn.disabled = true;
+    if (kind === 'resend') {
+      const { error } = await sb.rpc('attendance_resend', { p_count: c.id });
+      if (error) { toast(friendlyError(error)); if (btn) btn.disabled = false; return; }
+    }
+    toast('Sending…');
+    const res = await attEmail(c.id, kind !== 'send' || isAdmin());
+    toast(res.state === 'sent' ? 'Emailed to the secretary' : emailToast(res).replace(/^Submitted[.,]?\s*/, ''), 6000);
+  }
+
+  async function deleteCount(c) {
+    if (!confirm(`Delete the ${c.service_label || 'service'} count for ${attDay(c.service_date)}? This cannot be undone.`)) return;
+    const { error } = await sb.from('attendance_counts').delete().eq('id', c.id);
+    if (error) { toast(friendlyError(error)); return; }
+    await Promise.all([refreshTable('attendance_counts'), refreshTable('attendance_values')]);
+    location.hash = '#/attendance/' + c.service_date;
+    toast('Count deleted');
+  }
+
+  // ---- Admin setup: email, services, sections, export ----
+  const newKey = () => Math.random().toString(36).slice(2, 10);
+  function setupDraft() {
+    if (!state.att.setup) {
+      const st = attSettings();
+      state.att.setup = {
+        recipients: (st.recipients || []).join(', '),
+        email_when: st.email_when || 'each',
+        reply_to: st.reply_to || '',
+        services: attServices().map((s) => ({ k: newKey(), no: s.no, label: s.label, time: s.time })),
+        sections: state.data.attendance_sections.slice().sort((a, b) => a.sort_order - b.sort_order).map((s) => ({
+          k: newKey(), id: s.id, title: s.title,
+          fields: state.data.attendance_fields.filter((f) => f.section_id === s.id).sort((a, b) => a.sort_order - b.sort_order)
+            .map((f) => ({ k: newKey(), id: f.id, label: f.label, in_total: f.in_total }))
+        }))
+      };
+      state.att.setupDirty = false;
+    }
+    return state.att.setup;
+  }
+  const markDirty = () => {
+    if (state.att.setupDirty) return;
+    state.att.setupDirty = true;
+    const n = document.getElementById('as_dirty');
+    if (n) n.classList.remove('hidden');
+  };
+  function move(list, i, dir) {
+    const j = i + dir;
+    if (j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    markDirty();
+    render();
+  }
+  const textIn = (id, value, onChange, attrs = {}) => {
+    const el = h('input', { id, type: 'text', class: 'input', autocomplete: 'off', ...attrs });
+    el.value = value || '';
+    el.addEventListener('input', () => { onChange(el.value); markDirty(); });
+    return el;
+  };
+  const tinyBtn = (label, aria, fn, disabled) => h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': aria, title: aria, disabled: disabled || null, onclick: fn }, label);
+
+  function attendanceSetupView() {
+    if (state.attMissing) return attendanceView();
+    const m = setupDraft();
+    const content = [];
+    content.push(h('div', { id: 'as_dirty', class: 'notice' + (state.att.setupDirty ? '' : ' hidden') }, 'You have unsaved changes. Tap Save at the bottom.'));
+
+    // Email
+    content.push(h('div', { class: 'section-title' }, 'Email to the secretary'));
+    const when = h('select', { id: 'as_when', class: 'input' },
+      h('option', { value: 'each' }, 'After each service'),
+      h('option', { value: 'day' }, 'Once all services that day are in'));
+    when.value = m.email_when;
+    when.addEventListener('change', () => { m.email_when = when.value; markDirty(); });
+    content.push(h('div', { class: 'card' },
+      h('div', { class: 'field' }, h('label', { for: 'as_rcpt' }, 'Send to'),
+        textIn('as_rcpt', m.recipients, (v) => { m.recipients = v; }, { type: 'email', inputmode: 'email', placeholder: 'secretary@example.org', multiple: true }),
+        h('div', { class: 'hint' }, 'Separate more than one address with commas.')),
+      h('div', { class: 'field' }, h('label', { for: 'as_when' }, 'When'), when,
+        h('div', { class: 'hint' }, 'Each email shows every service submitted for that date so far, plus the day total.')),
+      h('div', { class: 'field' }, h('label', { for: 'as_reply' }, 'Replies go to (optional)'),
+        textIn('as_reply', m.reply_to, (v) => { m.reply_to = v; }, { type: 'email', inputmode: 'email', placeholder: 'Blank = whoever submitted the count' }))));
+
+    // Services
+    content.push(h('div', { class: 'section-title' }, 'Services'));
+    content.push(h('div', { class: 'card' },
+      m.services.map((s, i) => h('div', { class: 'as-row' },
+        textIn('as_svc_' + s.k, s.label, (v) => { s.label = v; }, { placeholder: 'e.g. First Service', 'aria-label': 'Service name' }),
+        (() => {
+          const t = h('input', { type: 'time', id: 'as_svct_' + s.k, class: 'input as-time', 'aria-label': 'Start time' });
+          t.value = s.time || '';
+          t.addEventListener('input', () => { s.time = t.value; markDirty(); });
+          return t;
+        })(),
+        tinyBtn(icon('x'), 'Remove service', () => {
+          if (m.services.length === 1) { toast('Keep at least one service.'); return; }
+          if (!confirm(`Remove "${s.label || 'this service'}"? Counts already taken for it are kept.`)) return;
+          m.services.splice(i, 1); markDirty(); render();
+        }))),
+      h('div', { class: 'hint' }, 'Listed in time order. The count screen shows one section per service.'),
+      h('button', { type: 'button', class: 'btn small', onclick: () => {
+        const no = Math.max(0, ...m.services.map((s) => s.no)) + 1;
+        m.services.push({ k: newKey(), no, label: '', time: '' }); markDirty(); render();
+        const el = document.getElementById('as_svc_' + m.services[m.services.length - 1].k); if (el) el.focus();
+      } }, '+ Add service')));
+
+    // Sections
+    content.push(h('div', { class: 'section-title' }, 'Form sections'));
+    content.push(h('p', { class: 'muted small' }, 'Changes apply to counts that aren\'t submitted yet. Submitted counts keep the names they were counted with.'));
+    m.sections.forEach((s, si) => {
+      content.push(h('div', { class: 'card as-section' },
+        h('div', { class: 'as-row' },
+          h('span', { class: 'as-letter' }, letter(si) + '.'),
+          textIn('as_sec_' + s.k, s.title, (v) => { s.title = v; }, { placeholder: 'Section name (e.g. Nursery)', 'aria-label': 'Section name' }),
+          tinyBtn('↑', 'Move section up', () => move(m.sections, si, -1), si === 0),
+          tinyBtn('↓', 'Move section down', () => move(m.sections, si, 1), si === m.sections.length - 1),
+          tinyBtn(icon('x'), 'Remove section', () => {
+            if (s.id && !confirm(`Remove the "${s.title}" section and its lines from the form?`)) return;
+            m.sections.splice(si, 1); markDirty(); render();
+          })),
+        h('div', { class: 'as-fields' }, s.fields.map((f, fi) => {
+          const inTotal = h('input', { type: 'checkbox', id: 'as_tot_' + f.k });
+          inTotal.checked = f.in_total !== false;
+          inTotal.addEventListener('change', () => { f.in_total = inTotal.checked; markDirty(); });
+          return h('div', { class: 'as-field' },
+            h('div', { class: 'as-row' },
+              h('span', { class: 'as-num' }, (fi + 1) + '.'),
+              textIn('as_fld_' + f.k, f.label, (v) => { f.label = v; }, { placeholder: 'Line (e.g. Children)', 'aria-label': 'Line name' }),
+              tinyBtn('↑', 'Move line up', () => move(s.fields, fi, -1), fi === 0),
+              tinyBtn('↓', 'Move line down', () => move(s.fields, fi, 1), fi === s.fields.length - 1),
+              tinyBtn(icon('x'), 'Remove line', () => { s.fields.splice(fi, 1); markDirty(); render(); })),
+            h('label', { class: 'as-check', for: 'as_tot_' + f.k }, inTotal, 'Counts toward the service total'));
+        })),
+        h('button', { type: 'button', class: 'btn small', onclick: () => {
+          s.fields.push({ k: newKey(), label: '', in_total: true }); markDirty(); render();
+          const el = document.getElementById('as_fld_' + s.fields[s.fields.length - 1].k); if (el) el.focus();
+        } }, '+ Add line')));
+    });
+    content.push(h('button', { type: 'button', class: 'btn', onclick: () => {
+      const s = { k: newKey(), title: '', fields: [{ k: newKey(), label: 'Children', in_total: true }, { k: newKey(), label: 'Adults', in_total: true }] };
+      m.sections.push(s); markDirty(); render();
+      const el = document.getElementById('as_sec_' + s.k); if (el) el.focus();
+    } }, '+ Add section'));
+
+    const saveBtn = h('button', { class: 'btn primary', onclick: (e) => saveSetup(e.currentTarget) }, 'Save');
+    content.push(h('div', { class: 'actions as-save' },
+      h('button', { class: 'btn', onclick: () => { state.att.setup = null; render(); } }, 'Undo changes'),
+      saveBtn));
+
+    // Export
+    content.push(h('div', { class: 'section-title' }, 'Export submitted counts'));
+    content.push(h('div', { class: 'card' },
+      h('p', { class: 'body-text', style: null }, 'Spreadsheet files (CSV) of every submitted count.'),
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn small', onclick: (e) => exportCsv('totals', e.currentTarget) }, 'Totals per service'),
+        h('button', { class: 'btn small', onclick: (e) => exportCsv('lines', e.currentTarget) }, 'Every line'))));
+
+    return { title: 'Attendance form', back: '#/attendance', content };
+  }
+
+  async function saveSetup(btn) {
+    const m = setupDraft();
+    const recipients = m.recipients.split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean);
+    const bad = recipients.find((x) => !validEmail(x));
+    if (bad) { toast(`"${bad}" is not an email address.`, 5000); return; }
+    if (m.reply_to.trim() && !validEmail(m.reply_to.trim())) { toast('Replies-to must be an email address (or blank).', 5000); return; }
+    for (const s of m.services) if (!s.label.trim() || !s.time) { toast('Give every service a name and a start time.', 5000); return; }
+    for (const s of m.sections) {
+      if (!s.title.trim()) { toast('Every section needs a name.', 5000); return; }
+      if (!s.fields.length) { toast(`"${s.title}" needs at least one line.`, 5000); return; }
+      if (s.fields.some((f) => !f.label.trim())) { toast(`Every line in "${s.title}" needs a name.`, 5000); return; }
+    }
+    if (!m.sections.length) { toast('The form needs at least one section.', 5000); return; }
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    const { error } = await sb.rpc('attendance_save_setup', {
+      p: {
+        recipients, email_when: m.email_when, reply_to: m.reply_to.trim(),
+        services: m.services.map((s) => ({ no: s.no, label: s.label.trim(), time: s.time })),
+        sections: m.sections.map((s) => ({ id: s.id || null, title: s.title.trim(), fields: s.fields.map((f) => ({ id: f.id || null, label: f.label.trim(), in_total: f.in_total !== false })) }))
+      }
+    });
+    if (error) { toast(friendlyError(error), 6000); btn.disabled = false; btn.textContent = 'Save'; return; }
+    await Promise.all(['attendance_settings', 'attendance_sections', 'attendance_fields'].map(refreshTable));
+    state.att.setup = null;
+    render();
+    toast('Attendance form saved');
+  }
+
+  async function fetchAllRows(build) {
+    const out = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await build().range(from, from + 999);
+      if (error) throw error;
+      out.push(...data);
+      if (data.length < 1000) return out;
+    }
+  }
+  const csvCell = (v) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  async function exportCsv(kind, btn) {
+    btn.disabled = true;
+    try {
+      let rows;
+      if (kind === 'totals') {
+        const data = await fetchAllRows(() => sb.from('attendance_counts').select('service_date,service_no,service_label,total').eq('status', 'submitted').order('service_date').order('service_no'));
+        rows = [['Date', 'Service', 'Total'], ...data.map((r) => [r.service_date, r.service_label || `Service ${r.service_no}`, r.total])];
+      } else {
+        const data = await fetchAllRows(() => sb.from('attendance_report').select('*').eq('status', 'submitted').order('service_date').order('service_no').order('sort_order'));
+        rows = [['Date', 'Service', 'Section', 'Line', 'Count', 'In total'],
+          ...data.map((r) => [r.service_date, r.service_label || `Service ${r.service_no}`, r.section_title, r.field_label, r.value == null ? '' : r.value, r.field_label === 'Total' && !r.section_title ? '' : (r.in_total ? 'yes' : 'no')])];
+      }
+      const csv = '﻿' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+      const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+      const a = h('a', { href: url, download: `attendance-${kind}-${todayIso()}.csv` });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      toast(rows.length > 1 ? 'Downloaded' : 'No submitted counts yet');
+    } catch (e) {
+      toast(friendlyError(e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // ------------------------------------------------------------------
   // More / account / users
   // ------------------------------------------------------------------
   const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
@@ -2395,6 +3169,10 @@
         h('a', { class: 'list-item', href: '#/assignments' },
           h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Update assignments'),
             h('div', { class: 'sub' }, 'Fill Sunday posts by week of the month')),
+          icon('chev')),
+        h('a', { class: 'list-item', href: '#/attendance-setup' },
+          h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Attendance form'),
+            h('div', { class: 'sub' }, 'Sections, services, secretary email, export')),
           icon('chev'))));
     }
 

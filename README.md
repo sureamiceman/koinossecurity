@@ -11,6 +11,8 @@ Progressive Web App (PWA) for the Koinos church security team. It installs on iP
 - **Repeating events** (like a phone calendar): daily, weekly on chosen days, every 2 weeks, or monthly (same date, e.g. 2nd Sunday, or last Sunday), with an optional end date. Posts, CCW preferences and default people carry to every date. Edits ask *This event only / This and following / All events*; swaps and one-off changes on specific dates are kept. Dates are generated about 6 months ahead and keep rolling forward.
 - **Update assignments (Sunday rotation)**: admins fill a grid of who serves each post on the 1st–5th Sunday of the month, for each service (e.g. 1st/2nd Service × Front Door / Mid Hallway / Back Hallway). *Apply to next 6 months* fills every matching Sunday, and new months keep filling from the grid as the schedule rolls forward. Swaps, covers, volunteers and one-off admin changes are kept unless *Also replace one-off changes* is ticked. Flags CCW-preferred posts given to someone without a CCW, and anyone on two posts in the same service. Open it from the Schedule tab or More. If no weekly Sunday services exist yet, it offers to create them.
 - **CCW-preferred posts**: a post can prefer a CCW-qualified person. It is never a hard requirement: anyone can be assigned, volunteer or cover. When the person on a CCW-preferred post has no current qualification on that date, their name is highlighted in red with a crossed-out CCW badge.
+- **Attendance count** (*Count* tab): replaces the paper "Worship Service Count". Pick a Sunday, then each service shows one button that changes from *Start Count* to *Resume Count* to *Submitted Count*. Counts save as you type, so anyone on the team can pick up a count someone else started, and two people can fill in different areas at once. *Submit* locks it (one count per service) and emails it to the secretary; after that only an admin can *Correct* it (optionally emailing the correction) or delete it. *Count a different date* covers special services.
+- **Attendance form** (admins: *Count → Set up*, or *More → Attendance form*): add, rename, reorder and remove sections and their lines (e.g. KidzZone → Children / Adults), mark a line as not counting toward the total, edit the services and their times, set who gets the email and whether it goes after each service or once all services that day are in. Submitted counts keep the names they were counted with. Export submitted counts as CSV: totals per service, or every line.
 - **Calendar subscriptions**: each person can create private links (their own posts, anyone's, or the whole team) that iPhone, Google and Outlook calendars subscribe to. Events read "Security Sunday Worship: 8:15–10:30 AM" and update when posts change.
 - **Team**: roster with photos, tap to call/text, Medical and CCW filters. CCW qualification with expiry date; admins are warned 30 days before it expires.
 - **Users**: approve sign-ups; superusers grant/revoke admin. Approving someone whose email matches a roster entry links them automatically.
@@ -37,6 +39,7 @@ All permissions are enforced by the database (row-level security), not just hidd
 - `netlify.toml`: publish folder and security headers
 - `netlify/functions/calendar.mjs`: the calendar subscription endpoint (`/cal/<token>.ics`)
 - `netlify/functions/push.mjs`: sends push notifications (`/api/push`); `package.json` lists its one library (`web-push`)
+- `netlify/functions/attendance-email.mjs`: emails submitted attendance counts to the secretary through Resend (`/api/attendance-email`)
 
 ## One-time setup
 
@@ -61,6 +64,20 @@ All permissions are enforced by the database (row-level security), not just hidd
 3. In the app: *More → Notifications → Turn on notifications*, then *Send a test*.
 
 If the variables are missing, the app still works; it just doesn't send notifications, and *Send a test* says the server isn't set up.
+
+## Attendance email setup (one time)
+
+Emails are sent through [Resend](https://resend.com) from a domain verified there (schrammscape.com is already verified).
+
+1. In Resend: *API Keys → Create API key*, permission **Sending access**, domain **schrammscape.com**. Copy it (it's shown once).
+2. In Netlify: *Site configuration → Environment variables*, add:
+   - `RESEND_API_KEY`: the key from step 1.
+   - `ATTENDANCE_FROM`: the sender, e.g. `Koinos Security <attendance@schrammscape.com>` (any address at the verified domain works; no mailbox is needed).
+   - `SUPABASE_SERVICE_ROLE_KEY` is already there from push notifications.
+3. *Deploys → Trigger deploy → Deploy site*.
+4. In the app: *Count → Set up*, enter the secretary's email under *Send to*, and save.
+
+Replies to the email go to whoever submitted the count, unless *Replies go to* is filled in. If an email can't be sent, the count is still saved and shows why; whoever submitted it (or an admin) can tap *Try again*.
 
 ## Passwords
 
