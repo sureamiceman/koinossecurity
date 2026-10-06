@@ -1450,6 +1450,317 @@ grant execute on function public.remove_push_subscription(text) to authenticated
 grant execute on function public.update_my_notify(boolean, boolean, boolean) to authenticated;
 
 -- ---------------------------------------------------------------------
+-- Attendance count: the weekly "Worship Service Count" form.
+--   attendance_settings   one row: services (First/Second…), who gets the
+--                         email, and when it is sent
+--   attendance_sections   the form's sections (Worship Center, KidzZone…)
+--   attendance_fields     the lines in each section (Children, Adults…)
+--   attendance_counts     one per date + service: open (in progress) or
+--                         submitted, with its total and email status
+--   attendance_values     one row per line counted; the section and line
+--                         names are copied in, so renaming or removing a
+--                         line later never changes old counts
+--   attendance_report     view: date, service, area, count — one row per
+--                         line plus a "Total" row per service (for exports)
+-- Members start, fill in and submit counts; once submitted, only admins
+-- can correct it. Admins edit the form. Emails are sent by the Netlify
+-- function netlify/functions/attendance-email.mjs.
+-- ---------------------------------------------------------------------
+create table if not exists public.attendance_settings (
+  id           int primary key default 1 check (id = 1),
+  services     jsonb not null default '[{"no":1,"label":"First Service","time":"09:00"},{"no":2,"label":"Second Service","time":"10:45"}]',
+  recipients   text[] not null default '{}',
+  email_when   text not null default 'each' check (email_when in ('each','day')),  -- each = after every service; day = once all services that day are in
+  reply_to     text not null default '',        -- blank = replies go to whoever submitted
+  updated_at   timestamptz not null default now(),
+  updated_by   uuid references public.profiles(id) on delete set null
+);
+insert into public.attendance_settings (id) values (1) on conflict (id) do nothing;
+
+create table if not exists public.attendance_sections (
+  id          uuid primary key default gen_random_uuid(),
+  title       text not null,
+  sort_order  int  not null default 0
+);
+
+create table if not exists public.attendance_fields (
+  id          uuid primary key default gen_random_uuid(),
+  section_id  uuid not null references public.attendance_sections(id) on delete cascade,
+  label       text not null,
+  in_total    boolean not null default true,    -- added into the service total
+  sort_order  int  not null default 0
+);
+create index if not exists attendance_fields_section_idx on public.attendance_fields(section_id);
+
+create table if not exists public.attendance_counts (
+  id                uuid primary key default gen_random_uuid(),
+  service_date      date not null,
+  service_no        int  not null check (service_no between 1 and 20),
+  service_label     text not null default '',
+  status            text not null default 'open' check (status in ('open','submitted')),
+  total             int  not null default 0,
+  notes             text not null default '',
+  started_by        uuid references public.profiles(id) on delete set null,
+  started_at        timestamptz not null default now(),
+  submitted_by      uuid references public.profiles(id) on delete set null,
+  submitted_at      timestamptz,
+  corrected_by      uuid references public.profiles(id) on delete set null,
+  corrected_at      timestamptz,
+  corrections       int  not null default 0,
+  -- none → pending (waiting for the email function) → sending → sent | failed
+  -- waiting = "email once all services are in" and the others aren't yet
+  email_state       text not null default 'none' check (email_state in ('none','pending','sending','waiting','sent','failed')),
+  email_error       text not null default '',
+  emailed_at        timestamptz,
+  updated_at        timestamptz not null default now(),
+  updated_by        uuid references public.profiles(id) on delete set null,
+  unique (service_date, service_no)
+);
+create index if not exists attendance_counts_date_idx on public.attendance_counts(service_date desc);
+
+create table if not exists public.attendance_values (
+  count_id       uuid not null references public.attendance_counts(id) on delete cascade,
+  field_key      text not null,              -- the form line's id when it was counted
+  section_title  text not null default '',
+  field_label    text not null default '',
+  in_total       boolean not null default true,
+  sort_order     int  not null default 0,
+  value          int  check (value between 0 and 100000),   -- blank = not counted yet
+  primary key (count_id, field_key)
+);
+
+-- Starting form, copied from the paper "Worship Service Count" (only if the form is empty).
+do $$
+declare s uuid;
+begin
+  if not exists (select 1 from public.attendance_sections) then
+    insert into public.attendance_sections (title, sort_order) values ('Worship Center', 1) returning id into s;
+    insert into public.attendance_fields (section_id, label, sort_order) values (s, 'People after children are dismissed', 1);
+    insert into public.attendance_sections (title, sort_order) values ('KidzZone', 2) returning id into s;
+    insert into public.attendance_fields (section_id, label, sort_order) values (s, 'Children', 1), (s, 'Adults', 2);
+    insert into public.attendance_sections (title, sort_order) values ('Nursery', 3) returning id into s;
+    insert into public.attendance_fields (section_id, label, sort_order) values (s, 'Children', 1), (s, 'Adults', 2);
+    insert into public.attendance_sections (title, sort_order) values ('Preschool', 4) returning id into s;
+    insert into public.attendance_fields (section_id, label, sort_order) values (s, 'Children', 1), (s, 'Adults', 2);
+  end if;
+end $$;
+
+-- Everyone on the team can read; changes go through the functions below
+-- (plus: admins can delete a count, and whoever started an open count can discard it).
+do $$
+declare t text;
+begin
+  foreach t in array array['attendance_settings','attendance_sections','attendance_fields','attendance_counts','attendance_values'] loop
+    execute format('alter table public.%I enable row level security', t);
+    execute format('drop policy if exists %I on public.%I', t || '_select', t);
+    execute format('create policy %I on public.%I for select to authenticated using (public.is_member())', t || '_select', t);
+    execute format('revoke all on public.%I from anon, authenticated', t);
+    execute format('grant select on public.%I to authenticated', t);
+  end loop;
+end $$;
+drop policy if exists attendance_counts_delete on public.attendance_counts;
+create policy attendance_counts_delete on public.attendance_counts for delete to authenticated
+  using (public.is_admin() or (status = 'open' and started_by = auth.uid() and public.is_member()));
+grant delete on public.attendance_counts to authenticated;
+
+create or replace view public.attendance_report with (security_invoker = true) as
+  select c.service_date, c.service_no, c.service_label, c.status,
+         v.sort_order, v.section_title, v.field_label, v.in_total, v.value
+    from public.attendance_counts c join public.attendance_values v on v.count_id = c.id
+  union all
+  select c.service_date, c.service_no, c.service_label, c.status,
+         1000000, '', 'Total', false, c.total
+    from public.attendance_counts c;
+revoke all on public.attendance_report from anon, authenticated;
+grant select on public.attendance_report to authenticated;
+
+-- Admins: save the whole setup at once (settings, services, sections and lines).
+-- p = { services: [{no,label,time}], recipients: [..], email_when, reply_to,
+--       sections: [{id?, title, fields: [{id?, label, in_total}]}] }
+-- Sections/lines left out are removed (old counts keep their copied names).
+create or replace function public.attendance_save_setup(p jsonb) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  sec jsonb; fld jsonb; svc jsonb;
+  s_id uuid; f_id uuid;
+  keep_s uuid[] := '{}'; keep_f uuid[] := '{}';
+  i int := 0; j int;
+  nos int[] := '{}';
+  em text;
+begin
+  if not public.is_admin() then raise exception 'Not authorized'; end if;
+
+  if jsonb_typeof(p->'services') <> 'array' or jsonb_array_length(p->'services') = 0 then
+    raise exception 'Add at least one service.';
+  end if;
+  for svc in select * from jsonb_array_elements(p->'services') loop
+    if coalesce(trim(svc->>'label'), '') = '' then raise exception 'Every service needs a name.'; end if;
+    if (svc->>'no')::int is null or (svc->>'no')::int not between 1 and 20 or (svc->>'no')::int = any(nos) then
+      raise exception 'Service numbers must be different (1–20).';
+    end if;
+    if coalesce(svc->>'time', '') !~ '^([01][0-9]|2[0-3]):[0-5][0-9]$' then raise exception 'Give each service a start time.'; end if;
+    nos := nos || (svc->>'no')::int;
+  end loop;
+  foreach em in array coalesce(array(select jsonb_array_elements_text(p->'recipients')), '{}') loop
+    if em !~ '^[^\s@]+@[^\s@]+\.[^\s@]+$' then raise exception '"%" is not an email address.', em; end if;
+  end loop;
+  if coalesce(p->>'reply_to', '') <> '' and p->>'reply_to' !~ '^[^\s@]+@[^\s@]+\.[^\s@]+$' then
+    raise exception 'Reply-to must be an email address (or blank).';
+  end if;
+
+  update public.attendance_settings
+     set services = (select jsonb_agg(jsonb_build_object('no', (e->>'no')::int, 'label', trim(e->>'label'), 'time', e->>'time')
+                                      order by e->>'time')
+                       from jsonb_array_elements(p->'services') e),
+         recipients = coalesce(array(select lower(trim(x)) from jsonb_array_elements_text(p->'recipients') x where trim(x) <> ''), '{}'),
+         email_when = case when p->>'email_when' = 'day' then 'day' else 'each' end,
+         reply_to = lower(trim(coalesce(p->>'reply_to', ''))),
+         updated_at = now(), updated_by = auth.uid()
+   where id = 1;
+
+  for sec in select * from jsonb_array_elements(coalesce(p->'sections', '[]')) loop
+    i := i + 1;
+    if coalesce(trim(sec->>'title'), '') = '' then raise exception 'Every section needs a name.'; end if;
+    s_id := nullif(sec->>'id', '')::uuid;
+    if s_id is not null and exists (select 1 from public.attendance_sections where id = s_id) then
+      update public.attendance_sections set title = trim(sec->>'title'), sort_order = i where id = s_id;
+    else
+      insert into public.attendance_sections (title, sort_order) values (trim(sec->>'title'), i) returning id into s_id;
+    end if;
+    keep_s := keep_s || s_id;
+    j := 0;
+    for fld in select * from jsonb_array_elements(coalesce(sec->'fields', '[]')) loop
+      j := j + 1;
+      if coalesce(trim(fld->>'label'), '') = '' then raise exception 'Every line in "%" needs a name.', trim(sec->>'title'); end if;
+      f_id := nullif(fld->>'id', '')::uuid;
+      if f_id is not null and exists (select 1 from public.attendance_fields where id = f_id) then
+        update public.attendance_fields
+           set section_id = s_id, label = trim(fld->>'label'), in_total = coalesce((fld->>'in_total')::boolean, true), sort_order = j
+         where id = f_id;
+      else
+        insert into public.attendance_fields (section_id, label, in_total, sort_order)
+        values (s_id, trim(fld->>'label'), coalesce((fld->>'in_total')::boolean, true), j) returning id into f_id;
+      end if;
+      keep_f := keep_f || f_id;
+    end loop;
+    if j = 0 then raise exception 'Section "%" needs at least one line to count.', trim(sec->>'title'); end if;
+  end loop;
+  if i = 0 then raise exception 'The form needs at least one section.'; end if;
+
+  delete from public.attendance_fields where not (id = any(keep_f));
+  delete from public.attendance_sections where not (id = any(keep_s));
+end $$;
+
+-- Recalculate a count's total from its lines.
+create or replace function public.attendance_total(p_count uuid) returns int
+language sql stable security definer set search_path = public as $$
+  select coalesce(sum(value) filter (where in_total), 0)::int from public.attendance_values where count_id = p_count
+$$;
+
+-- Start, save (autosave), submit, or (admins) correct a count.
+--   p_values  { "<line id>": number or null, … }  — lines left out keep their value
+--   p_notes   null = leave notes as they are
+--   p_submit  true = submit (or, for an admin on a submitted count, save the correction)
+--   p_email   false = an admin correction that should not be emailed again
+create or replace function public.attendance_save(p_date date, p_service int, p_values jsonb, p_notes text,
+                                                  p_submit boolean, p_email boolean default true)
+returns public.attendance_counts
+language plpgsql security definer set search_path = public as $$
+declare
+  c public.attendance_counts;
+  svc jsonb;
+  vals jsonb := coalesce(p_values, '{}');
+  who text;
+begin
+  if not public.is_member() then raise exception 'Not authorized'; end if;
+  if p_date is null or p_service is null then raise exception 'Pick a date and service.'; end if;
+  if p_date > (now() at time zone 'America/New_York')::date then raise exception 'That date hasn''t happened yet.'; end if;
+  if jsonb_typeof(vals) <> 'object' then raise exception 'Invalid counts'; end if;
+
+  select * into c from public.attendance_counts where service_date = p_date and service_no = p_service for update;
+  if not found then
+    select e into svc from public.attendance_settings s, jsonb_array_elements(s.services) e
+     where s.id = 1 and (e->>'no')::int = p_service;
+    if svc is null then raise exception 'That service isn''t on the form any more.'; end if;
+    insert into public.attendance_counts (service_date, service_no, service_label, started_by, updated_by)
+    values (p_date, p_service, svc->>'label', auth.uid(), auth.uid())
+    on conflict (service_date, service_no) do nothing;
+    select * into c from public.attendance_counts where service_date = p_date and service_no = p_service for update;
+  end if;
+
+  -- Once submitted, only an admin's deliberate correction (p_submit) can change it,
+  -- never an autosave from a screen that was opened before it was submitted.
+  if c.status = 'submitted' and not (public.is_admin() and p_submit) then
+    select coalesce(nullif(full_name, ''), email) into who from public.profiles where id = c.submitted_by;
+    raise exception 'This count was already submitted by % on %. Ask an admin if it needs a correction.',
+      coalesce(who, 'someone'), to_char(c.submitted_at at time zone 'America/New_York', 'Mon FMDD at FMHH12:MI AM');
+  end if;
+
+  if c.status = 'open' then
+    -- Open counts always follow the current form: add new lines, drop removed ones.
+    insert into public.attendance_values (count_id, field_key, section_title, field_label, in_total, sort_order, value)
+    select c.id, f.id::text, s.title, f.label, f.in_total, s.sort_order * 1000 + f.sort_order,
+           case when vals ? f.id::text then nullif(vals->>f.id::text, '')::numeric::int
+                else (select v.value from public.attendance_values v where v.count_id = c.id and v.field_key = f.id::text) end
+      from public.attendance_fields f join public.attendance_sections s on s.id = f.section_id
+    on conflict (count_id, field_key) do update
+      set section_title = excluded.section_title, field_label = excluded.field_label,
+          in_total = excluded.in_total, sort_order = excluded.sort_order, value = excluded.value;
+    delete from public.attendance_values v
+     where v.count_id = c.id and not exists (select 1 from public.attendance_fields f where f.id::text = v.field_key);
+  else
+    -- A correction keeps the lines exactly as they were when it was counted.
+    update public.attendance_values v
+       set value = nullif(vals->>v.field_key, '')::numeric::int
+     where v.count_id = c.id and vals ? v.field_key;
+  end if;
+
+  update public.attendance_counts
+     set total = public.attendance_total(c.id),
+         notes = coalesce(left(p_notes, 2000), notes),
+         updated_at = now(), updated_by = auth.uid()
+   where id = c.id;
+
+  if p_submit then
+    if c.status = 'open' then
+      update public.attendance_counts
+         set status = 'submitted', submitted_by = auth.uid(), submitted_at = now(),
+             email_state = 'pending', email_error = ''
+       where id = c.id;
+    else
+      update public.attendance_counts
+         set corrected_by = auth.uid(), corrected_at = now(), corrections = corrections + 1,
+             email_state = case when p_email then 'pending' else email_state end,
+             email_error = case when p_email then '' else email_error end
+       where id = c.id;
+    end if;
+  end if;
+
+  select * into c from public.attendance_counts where id = c.id;
+  return c;
+end $$;
+
+-- Send the email again: admins any time; whoever submitted it if sending failed.
+create or replace function public.attendance_resend(p_count uuid) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_member() then raise exception 'Not authorized'; end if;
+  update public.attendance_counts
+     set email_state = 'pending', email_error = ''
+   where id = p_count and status = 'submitted'
+     and (public.is_admin() or (submitted_by = auth.uid() and email_state = 'failed'));
+  if not found then raise exception 'Only an admin can resend this.'; end if;
+end $$;
+
+revoke all on function public.attendance_save_setup(jsonb) from public, anon;
+revoke all on function public.attendance_total(uuid) from public, anon, authenticated;
+revoke all on function public.attendance_save(date, int, jsonb, text, boolean, boolean) from public, anon;
+revoke all on function public.attendance_resend(uuid) from public, anon;
+grant execute on function public.attendance_save_setup(jsonb) to authenticated;
+grant execute on function public.attendance_save(date, int, jsonb, text, boolean, boolean) to authenticated;
+grant execute on function public.attendance_resend(uuid) to authenticated;
+
+-- ---------------------------------------------------------------------
 -- Photo storage (private bucket; members view, admins upload)
 -- ---------------------------------------------------------------------
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
@@ -1506,7 +1817,7 @@ create policy "photos_self_delete" on storage.objects for delete to authenticate
 do $$
 declare t text;
 begin
-  foreach t in array array['bulletins','events','shifts','posts','post_replies'] loop
+  foreach t in array array['bulletins','events','shifts','posts','post_replies','attendance_counts'] loop
     if not exists (
       select 1 from pg_publication_tables
       where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t
