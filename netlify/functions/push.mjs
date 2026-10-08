@@ -79,6 +79,7 @@ export function makeDb(serviceKey, base = SUPABASE_URL) {
   return {
     get: (path) => call('GET', path),
     patch: (path, payload) => call('PATCH', path, payload, { Prefer: 'return=representation' }),
+    post: (path, payload) => call('POST', path, payload, { Prefer: 'return=representation' }),
     del: (path) => call('DELETE', path)
   };
 }
@@ -170,7 +171,7 @@ export async function sendAll(db, deliveries) {
     try {
       await webpush.sendNotification(
         { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-        JSON.stringify({ title: msg.title, body: msg.body, url: msg.url, tag: msg.tag }),
+        JSON.stringify({ title: msg.title, body: msg.body, url: msg.url, tag: msg.tag, ...(msg.extra || {}) }),
         { TTL: msg.urgent ? 6 * 3600 : 24 * 3600, urgency: msg.urgent ? 'high' : 'normal' });
       sent++;
     } catch (e) {

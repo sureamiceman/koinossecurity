@@ -758,9 +758,9 @@
     let [tab, id, sub] = route();
     if ((tab === 'users' || tab === 'assignments') && !isAdmin()) tab = 'more';
     if (tab === 'attendance-setup' && !isAdmin()) tab = 'attendance';
-    const views = { alerts: alertsView, schedule: scheduleView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView };
+    const views = { alerts: alertsView, schedule: scheduleView, confirm: confirmView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView };
     const v = (views[tab] || alertsView)(id, sub);
-    const activeTab = tab === 'users' ? 'more' : tab === 'assignments' ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : (views[tab] ? tab : 'alerts');
+    const activeTab = tab === 'users' ? 'more' : (tab === 'assignments' || tab === 'confirm') ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : (views[tab] ? tab : 'alerts');
 
     if (activeTab === 'alerts') {
       state.lastSeenAlerts = Date.now();
@@ -777,7 +777,7 @@
       navigator.onLine ? null : h('div', { class: 'offline-bar' }, 'Offline — showing saved information'),
       h('main', {}, v.content),
       h('nav', { class: 'tabbar', 'aria-label': 'Main' }, TABS.map(([key, label, ic]) => {
-        const count = key === 'alerts' ? alertCount : key === 'more' ? moreCount : key === 'schedule' ? coverCount() : key === 'board' && activeTab !== 'board' ? unseenBoard() : key === 'attendance' ? openCountsCount() : 0;
+        const count = key === 'alerts' ? alertCount : key === 'more' ? moreCount : key === 'schedule' ? coverCount() + myAskedShifts().length : key === 'board' && activeTab !== 'board' ? unseenBoard() : key === 'attendance' ? openCountsCount() : 0;
         return h('a', { href: '#/' + key, class: activeTab === key ? 'active' : null, 'aria-current': activeTab === key ? 'page' : null },
           icon(ic), label, count ? h('span', { class: 'dot' }, count > 9 ? '9+' : count) : null);
       })));
@@ -1371,6 +1371,13 @@
   }
 
   function scheduleView() {
+    const v = scheduleViewInner();
+    const banner = confirmBanner();
+    if (banner) v.content = [banner, ...[].concat(v.content)];
+    return v;
+  }
+
+  function scheduleViewInner() {
     const f = state.sched;
     const me = myRoster();
     const chip = (key, label) => h('button', { class: 'chip' + (f.filter === key ? ' on' : ''), onclick: () => { f.filter = key; render(); } }, label);
@@ -1496,7 +1503,8 @@
           h('h3', {}, e.title),
           h('div', { class: 'muted small' }, timeRange(start, end) + (e.location ? ' · ' + e.location : '')),
           series ? h('div', { class: 'muted tiny repeat-line' }, '↻ ' + repeatLabel(series) + (e.is_exception ? ' · changed for this date' : '')) : null,
-          open && upcoming ? h('span', { class: 'badge caution' }, `${open} open post${open > 1 ? 's' : ''}`) : null)),
+          open && upcoming ? h('span', { class: 'badge caution' }, `${open} open post${open > 1 ? 's' : ''}`) : null,
+          upcoming ? confirmSummary(allShifts) : null)),
       e.notes ? h('p', { class: 'body-text small' }, e.notes) : null,
       h('div', { class: 'shift-list' },
         shifts.length ? shifts.map((s) => shiftRow(s, e, me, upcoming))
@@ -1527,6 +1535,8 @@
     const iMiss = s.requires_ccw && !ccwOkOn(me, e.starts_at);
     const ccwNote = iMiss ? "\n\nThis post prefers a CCW-qualified person, and you aren't listed as CCW-qualified on this date. You can still take it; it will be flagged on the schedule." : '';
     const actions = [];
+    const answerable = mine && upcoming && !s.cover_requested && (s.confirm_state === 'asked' || (s.confirm_state === 'none' && shiftStart(s, e) - Date.now() < 7 * 864e5));
+    if (answerable) actions.push(h('button', { class: 'btn small primary', onclick: () => confirmMine(s) }, 'Confirm'));
     if (upcoming && me) {
       if (!s.roster_id) {
         actions.push(h('button', { class: 'btn small primary', onclick: () => shiftAction('volunteer_shift', { p_shift: s.id }, `Volunteer for ${s.post || 'this post'} at ${e.title}?` + ccwNote, "You're on the schedule — thanks!") }, 'Volunteer'));
@@ -1547,7 +1557,10 @@
           assigned ? avatar(assigned) : h('span', { class: 'avatar open', 'aria-hidden': 'true' }, '?'),
           s.roster_id ? h('span', { class: 'person-name' + (notCcw ? ' ccw-miss' : '') }, rosterName(s.roster_id) + (mine ? ' (you)' : '')) : h('span', { class: 'badge caution' }, 'Open'),
           notCcw ? noCcwBadge() : null,
-          s.cover_requested ? h('span', { class: 'badge urgent' }, 'Needs cover') : null),
+          s.cover_requested ? h('span', { class: 'badge urgent' }, 'Needs cover') : null,
+          s.roster_id && !s.cover_requested && upcoming ? confirmBadge(s) : null,
+          isAdmin() && upcoming && assigned && !assigned.profile_id && 'confirm_state' in s && shiftStart(s, e) - Date.now() < 4 * 864e5
+            ? h('span', { class: 'badge muted-badge', title: "Not linked to an app account, so the app can't ask them to confirm" }, "No app, can't be asked") : null),
         s.note ? h('div', { class: 'muted small' }, s.note) : null,
         s.last_change ? h('div', { class: 'muted tiny' }, `${s.last_change} · ${relTime(s.updated_at)}`) : null),
       actions.length ? h('div', { class: 'shift-actions' }, actions) : null);
@@ -1561,6 +1574,115 @@
     if (fn === 'request_cover' || fn === 'cover_shift') { notifyServer(); await Promise.all([refreshTable('posts'), refreshTable('post_replies')]); }
     render();
     toast(doneText);
+  }
+
+  // ---- Shift confirmations ("Are you still on for Sunday?") ----
+  // Asked by netlify/functions/shift-reminders.mjs about 2½ days before.
+  function myAskedShifts() {
+    const me = myRoster();
+    if (!me) return [];
+    return state.data.shifts.filter((s) => s.roster_id === me.id && s.confirm_state === 'asked' && !s.cover_requested)
+      .map((s) => ({ s, e: eventOf(s) })).filter((x) => x.e && isUpcoming(x.e))
+      .sort((a, b) => shiftStart(a.s, a.e) - shiftStart(b.s, b.e));
+  }
+  function confirmBadge(s) {
+    if (s.confirm_state === 'confirmed') return h('span', { class: 'badge ok-badge', title: s.confirmed_at ? 'Confirmed ' + fmtDateTime(s.confirmed_at) : 'Confirmed' }, '✓ Confirmed');
+    if (s.confirm_state === 'asked') return h('span', { class: 'badge muted-badge', title: 'Asked ' + fmtDateTime(s.confirm_asked_at) }, 'Not confirmed yet');
+    return null;
+  }
+  function confirmSummary(shifts) {
+    const filled = shifts.filter((s) => s.roster_id && !s.cover_requested);
+    if (!filled.length || !filled.some((s) => s.confirm_state === 'asked' || s.confirm_state === 'confirmed')) return null;
+    const n = filled.filter((s) => s.confirm_state === 'confirmed').length;
+    return h('span', { class: 'badge ' + (n === filled.length ? 'ok-badge' : 'muted-badge') }, `✓ ${n} of ${filled.length} confirmed`);
+  }
+  const shiftWhen = (s, e) => shiftStart(s, e).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+  function confirmBanner() {
+    const list = myAskedShifts();
+    if (!list.length) return null;
+    return h('div', { class: 'card confirm-banner' },
+      h('div', { class: 'cb-title' }, list.length > 1 ? 'Please confirm your posts' : 'Please confirm your post'),
+      list.map(({ s, e }) => h('div', { class: 'cb-row' },
+        h('div', { class: 'grow' }, h('strong', {}, s.post || 'Post'), h('div', { class: 'muted small' }, `${e.title} · ${shiftWhen(s, e)}`)),
+        h('div', { class: 'cb-actions' },
+          h('button', { class: 'btn small primary', onclick: () => confirmMine(s) }, "Yes, I'll be there"),
+          h('button', { class: 'btn small', onclick: () => declineShift(s) }, 'No, need cover')))));
+  }
+
+  async function confirmMine(s, btn) {
+    if (btn) btn.disabled = true;
+    const { error } = await sb.rpc('confirm_shift', { p_shift: s.id });
+    await refreshTable('shifts');
+    render();
+    if (error) { toast(friendlyError(error), 6000); return; }
+    toast("Thanks, you're confirmed");
+  }
+
+  // "No": a cover request for this post, already filled in. They only add why.
+  function declineShift(s) {
+    const e = eventOf(s);
+    if (!e) return;
+    const when = shiftWhen(s, e);
+    openForm({
+      title: 'Ask for cover',
+      intro: h('div', { class: 'decline-intro' },
+        h('div', { class: 'decline-shift' },
+          h('strong', {}, s.post || 'Post'),
+          h('div', {}, e.title),
+          h('div', { class: 'muted small' }, when + (e.location ? ' · ' + e.location : ''))),
+        h('p', { class: 'muted small' }, 'This posts on the team board and marks your post "Needs cover" on the schedule. You stay on it until someone taps I\'ll cover.')),
+      fields: [{ name: 'why', label: 'Why do you need cover?', type: 'textarea', rows: 4, required: true, placeholder: 'e.g. Out of town that weekend' }],
+      submitLabel: 'Post to the team',
+      onSubmit: async (v) => {
+        const body = `Can anyone cover ${s.post || 'my post'} at ${e.title} on ${when}?\n\n${v.why}`;
+        const { data: pid, error } = await sb.rpc('create_swap_post', { p_shift: s.id, p_body: body });
+        if (error) throw error;
+        notifyServer();
+        await Promise.all([refreshTable('shifts'), refreshTable('posts'), refreshTable('post_replies')]);
+        location.hash = pid ? '#/board/' + encodeURIComponent(pid) : '#/board';
+        render();
+        toast('Cover request posted. The team has been notified.', 5000);
+      }
+    });
+  }
+
+  // Opened from the notification: #/confirm/<shift id>  (…/no = they tapped No)
+  function confirmView(id, sub) {
+    const s = state.data.shifts.find((x) => x.id === id);
+    const e = s && eventOf(s);
+    const me = myRoster();
+    const back = '#/schedule';
+    if (!s || !e) return { title: 'Your post', back, content: [h('div', { class: 'card' }, h('p', { class: 'body-text' }, "This post isn't on the schedule any more."))] };
+    const mine = me && s.roster_id === me.id;
+    const st = shiftStart(s, e);
+    const head = h('div', { class: 'row' },
+      h('div', { class: 'date-pill' },
+        h('div', { class: 'dp-dow' }, st.toLocaleDateString([], { weekday: 'short' })),
+        h('div', { class: 'dp-day' }, String(st.getDate()))),
+      h('div', { class: 'grow' },
+        h('h2', { class: 'confirm-post' }, s.post || 'Post'),
+        h('div', {}, e.title),
+        h('div', { class: 'muted small' }, timeRange(st, shiftEnd(s, e)) + (e.location ? ' · ' + e.location : ''))));
+    const body = [];
+    if (!isUpcoming(e)) body.push(h('p', { class: 'body-text' }, 'This event is already over.'));
+    else if (!mine) body.push(h('p', { class: 'body-text' }, s.roster_id ? `This post is now assigned to ${rosterName(s.roster_id)}, so there's nothing for you to do.` : 'This post is open now, so there\'s nothing for you to confirm.'));
+    else if (s.cover_requested) body.push(h('p', { class: 'body-text' }, "You've asked for cover on this post. You stay on it until someone takes it."),
+      h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => openCoverPost(s) }, 'View request')));
+    else if (s.confirm_state === 'confirmed') body.push(h('p', { class: 'confirm-done' }, "✓ You're confirmed. Thanks!"),
+      h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => declineShift(s) }, "Can't make it after all? Ask for cover")));
+    else {
+      body.push(h('p', { class: 'confirm-q' }, 'Are you still planning to cover this post?'),
+        h('div', { class: 'confirm-btns' },
+          h('button', { class: 'btn primary block', onclick: (ev) => confirmMine(s, ev.currentTarget) }, "Yes, I'll be there"),
+          h('button', { class: 'btn block', onclick: () => declineShift(s) }, 'No, I need cover')));
+      // Tapped "No" on the notification: go straight to the cover request (once).
+      if (sub === 'no' && state.declineOpened !== s.id) {
+        state.declineOpened = s.id;
+        setTimeout(() => { if (!document.querySelector('dialog[open]')) declineShift(s); }, 0);
+      }
+    }
+    return { title: 'Your post', back, content: [h('div', { class: 'card confirm-card' }, head, body)] };
   }
 
   function knownPosts() {
@@ -2282,7 +2404,7 @@
         cb.addEventListener('change', () => setNotifyPref(key, cb.checked));
         return h('div', { class: 'field check' }, h('label', { for: 'pref_' + key }, cb, label), hint ? h('div', { class: 'hint' }, hint) : null);
       };
-      parts.push(h('p', { class: 'body-text' }, 'Notifications are on for this device. Alerts always notify you.'),
+      parts.push(h('p', { class: 'body-text' }, 'Notifications are on for this device. Alerts and "are you still on?" shift checks always notify you.'),
         'notify_posts' in p ? [pref('notify_cover', 'Cover and swap requests'), pref('notify_posts', 'New board posts'), pref('notify_replies', 'Replies to threads you started or replied to')] : null,
         h('div', { class: 'actions' },
           h('button', { class: 'btn small', onclick: (e) => testPush(e.currentTarget) }, 'Send a test'),

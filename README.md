@@ -8,6 +8,7 @@ Progressive Web App (PWA) for the Koinos church security team. It installs on iP
 - **SOPs**: a rolodex of colored category tabs down the right side; tap a tab to see its procedures. Search looks across every tab. *+ New* starts in the tab you're on (changeable). Admins use *Edit tabs* to name, color and order the tabs (renaming a tab renames it on its SOPs; removing one moves its SOPs to the first tab). One-step rollback to the previous version.
 - **Contacts**: every active team member from the roster appears automatically, with Call and Text buttons (Text opens the phone's messaging app addressed to them), plus other contacts admins add, such as police non-emergency, church staff or utilities (also with Call and Text).
 - **Schedule**: services/events with posts. Members volunteer for open posts or cover for someone; admins assign and reassign people. *Need cover* on your own post opens a cover request on the team board with that post already chosen (the only way to ask for cover); once requested it shows *View request*. List and month views, filters for Mine / Needs cover / any person.
+- **Shift confirmations**: about 2½ days before a post, the person on it gets a notification "Are you still on for Sunday?" at 7 PM on the evening 48–72 hours before (Sunday morning → Thursday 7 PM), and a reminder at 7 PM the next evening if they haven't answered. **Yes** marks the post *✓ Confirmed* on the schedule (on Android it works right from the notification). **No** opens a cover request with the post already filled in; they only add why, and it posts to the team. Unanswered posts also show at the top of the Schedule tab with Yes/No buttons. People assigned after 7 PM are asked at the next run, never overnight (8 AM–9 PM) and not within 3 hours of the post. Volunteering for or covering a post counts as confirmed; a new person or a new time starts over. Admins see "✓ 2 of 3 confirmed" on each event, and a note on posts held by someone without the app (they can't be asked).
 - **Repeating events** (like a phone calendar): daily, weekly on chosen days, every 2 weeks, or monthly (same date, e.g. 2nd Sunday, or last Sunday), with an optional end date. Posts, CCW preferences and default people carry to every date. Edits ask *This event only / This and following / All events*; swaps and one-off changes on specific dates are kept. Dates are generated about 6 months ahead and keep rolling forward.
 - **Update assignments (Sunday rotation)**: admins fill a grid of who serves each post on the 1st–5th Sunday of the month, for each service (e.g. 1st/2nd Service × Front Door / Mid Hallway / Back Hallway). *Apply to next 6 months* fills every matching Sunday, and new months keep filling from the grid as the schedule rolls forward. Swaps, covers, volunteers and one-off admin changes are kept unless *Also replace one-off changes* is ticked. Flags CCW-preferred posts given to someone without a CCW, and anyone on two posts in the same service. Open it from the Schedule tab or More. If no weekly Sunday services exist yet, it offers to create them.
 - **CCW-preferred posts**: a post can prefer a CCW-qualified person. It is never a hard requirement: anyone can be assigned, volunteer or cover. When the person on a CCW-preferred post has no current qualification on that date, their name is highlighted in red with a crossed-out CCW badge.
@@ -39,6 +40,7 @@ All permissions are enforced by the database (row-level security), not just hidd
 - `netlify.toml`: publish folder and security headers
 - `netlify/functions/calendar.mjs`: the calendar subscription endpoint (`/cal/<token>.ics`)
 - `netlify/functions/push.mjs`: sends push notifications (`/api/push`); `package.json` lists its one library (`web-push`)
+- `netlify/functions/shift-reminders.mjs`: runs every hour and sends the shift confirmation notifications; `netlify/functions/shift-reply.mjs` handles the notification's Yes button (`/api/shift-reply`)
 - `netlify/functions/attendance-email.mjs`: emails submitted attendance counts to the secretary through Resend (`/api/attendance-email`)
 
 ## One-time setup
@@ -64,6 +66,8 @@ All permissions are enforced by the database (row-level security), not just hidd
 3. In the app: *More → Notifications → Turn on notifications*, then *Send a test*.
 
 If the variables are missing, the app still works; it just doesn't send notifications, and *Send a test* says the server isn't set up.
+
+Shift confirmations use the same two variables. `shift-reminders.mjs` is a Netlify *scheduled function* (it runs hourly on the published site only; see *Logs → Functions → shift-reminders* in Netlify). Times are Eastern (`TIME_ZONE`, `ASK_HOUR` at the top of that file).
 
 ## Attendance email setup (one time)
 

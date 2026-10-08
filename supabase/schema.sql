@@ -1115,7 +1115,9 @@ begin
   select name into my_name from public.roster where id = me;
   update public.shifts
      set cover_requested = p_on,
-         last_change = my_name || case when p_on then ' asked for cover' else ' no longer needs cover' end
+         last_change = my_name || case when p_on then ' asked for cover' else ' no longer needs cover' end,
+         confirm_state = case when p_on then 'declined' else 'confirmed' end,
+         confirmed_at = case when p_on then null else now() end
    where id = p_shift;
   -- Board post for the request (removed again if withdrawn before anyone replied).
   if p_on then
@@ -1314,7 +1316,9 @@ begin
     new.roster_id := old.roster_id;
     new.created_at := old.created_at;
     if auth.uid() is not null and not public.is_admin() then new.pinned := old.pinned; end if;
-    if (new.body, new.photo_path) is distinct from (old.body, old.photo_path) then
+    -- (Filling in the message in the same step that created the post, as a
+    -- cover request does, isn't an edit.)
+    if (new.body, new.photo_path) is distinct from (old.body, old.photo_path) and old.created_at <> now() then
       new.edited_at := now();
       new.last_activity_at := now();
     end if;
@@ -1436,6 +1440,124 @@ begin
 end $$;
 revoke all on function public.create_swap_post(uuid, text) from public, anon;
 grant execute on function public.create_swap_post(uuid, text) to authenticated;
+
+-- ---------------------------------------------------------------------
+-- Shift confirmations. About 2½ days before a shift (7 PM on the evening
+-- that falls 48–72 hours before it, e.g. Thursday evening for Sunday
+-- morning) the assigned person gets "Are you still on?" with a reminder the
+-- next evening if they haven't answered. Sent by the scheduled Netlify
+-- function netlify/functions/shift-reminders.mjs.
+--   none       not asked yet
+--   asked      asked, no answer yet
+--   confirmed  said yes (or volunteered/covered it themselves)
+--   declined   said no / asked for cover
+-- shift_confirm_tokens lets the notification's "Yes" button confirm without
+-- opening the app (see netlify/functions/shift-reply.mjs). Only the server
+-- can read it.
+-- ---------------------------------------------------------------------
+alter table public.shifts add column if not exists confirm_state text not null default 'none';
+alter table public.shifts add column if not exists confirm_asked_at timestamptz;
+alter table public.shifts add column if not exists confirm_reminded_at timestamptz;
+alter table public.shifts add column if not exists confirmed_at timestamptz;
+do $$ begin
+  alter table public.shifts add constraint shifts_confirm_state_check check (confirm_state in ('none','asked','confirmed','declined'));
+exception when duplicate_object then null; end $$;
+
+create table if not exists public.shift_confirm_tokens (
+  token       text primary key,
+  shift_id    uuid not null references public.shifts(id) on delete cascade,
+  created_at  timestamptz not null default now()
+);
+create index if not exists shift_confirm_tokens_shift_idx on public.shift_confirm_tokens(shift_id);
+alter table public.shift_confirm_tokens enable row level security;   -- no policies: server only
+revoke all on public.shift_confirm_tokens from anon, authenticated;
+
+-- A new person on the post, or a new time, starts over. Someone who takes a
+-- post themselves (volunteers or covers) has obviously confirmed it.
+create or replace function public.shifts_confirm_reset() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  from_template boolean := coalesce(current_setting('koinos.template', true), '') = 'on';
+begin
+  if new.roster_id is distinct from old.roster_id then
+    new.confirm_asked_at := null; new.confirm_reminded_at := null;
+    delete from public.shift_confirm_tokens where shift_id = new.id;
+    if new.roster_id is not null and not from_template and auth.uid() is not null
+       and new.roster_id = public.my_roster_id() then
+      new.confirm_state := 'confirmed'; new.confirmed_at := now();
+    else
+      new.confirm_state := 'none'; new.confirmed_at := null;
+    end if;
+  elsif (new.starts_at, new.ends_at) is distinct from (old.starts_at, old.ends_at)
+        and new.confirm_state in ('asked','confirmed') then
+    new.confirm_state := 'none'; new.confirmed_at := null;
+    new.confirm_asked_at := null; new.confirm_reminded_at := null;
+    delete from public.shift_confirm_tokens where shift_id = new.id;
+  end if;
+  return new;
+end $$;
+drop trigger if exists shifts_confirm on public.shifts;
+create trigger shifts_confirm before update on public.shifts
+  for each row execute function public.shifts_confirm_reset();
+
+-- An event moved to a different time: everyone on it is asked again.
+create or replace function public.events_confirm_reset() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.starts_at is distinct from old.starts_at then
+    update public.shifts
+       set confirm_state = 'none', confirmed_at = null, confirm_asked_at = null, confirm_reminded_at = null
+     where event_id = new.id and starts_at is null and confirm_state in ('asked','confirmed');
+    delete from public.shift_confirm_tokens t using public.shifts sh
+     where t.shift_id = sh.id and sh.event_id = new.id and sh.starts_at is null and sh.confirm_state = 'none';
+  end if;
+  return null;
+end $$;
+drop trigger if exists events_confirm_reset on public.events;
+create trigger events_confirm_reset after update on public.events
+  for each row execute function public.events_confirm_reset();
+
+-- "Yes, I'll be there" from the app.
+create or replace function public.confirm_shift(p_shift uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  me uuid := public.my_roster_id();
+  s  record;
+begin
+  if not public.is_member() then raise exception 'Not authorized'; end if;
+  select sh.*, e.ends_at as event_end into s
+    from public.shifts sh join public.events e on e.id = sh.event_id
+   where sh.id = p_shift for update of sh;
+  if not found then raise exception 'Post not found'; end if;
+  if me is null or s.roster_id is distinct from me then raise exception 'This post isn''t assigned to you any more.'; end if;
+  if s.event_end < now() then raise exception 'That event is already over'; end if;
+  if s.cover_requested then raise exception 'You''ve asked for cover on this post. Withdraw the request on the board first if you can make it after all.'; end if;
+  update public.shifts set confirm_state = 'confirmed', confirmed_at = now() where id = p_shift;
+end $$;
+revoke all on function public.confirm_shift(uuid) from public, anon;
+grant execute on function public.confirm_shift(uuid) to authenticated;
+
+-- The notification's "Yes" button (server only: netlify/functions/shift-reply.mjs).
+-- Returns what the post's state is afterwards: confirmed, declined, over or gone.
+create or replace function public.confirm_shift_by_token(p_token text) returns text
+language plpgsql security definer set search_path = public as $$
+declare s record;
+begin
+  select sh.id, sh.confirm_state, sh.cover_requested, e.ends_at as event_end into s
+    from public.shift_confirm_tokens t
+    join public.shifts sh on sh.id = t.shift_id
+    join public.events e on e.id = sh.event_id
+   where t.token = p_token
+   for update of sh;
+  if not found then return 'gone'; end if;
+  if s.event_end < now() then return 'over'; end if;
+  if s.cover_requested then return 'declined'; end if;
+  update public.shifts set confirm_state = 'confirmed', confirmed_at = coalesce(confirmed_at, now())
+   where id = s.id and confirm_state in ('none','asked','confirmed');
+  return 'confirmed';
+end $$;
+revoke all on function public.confirm_shift_by_token(text) from public, anon, authenticated;
+grant execute on function public.confirm_shift_by_token(text) to service_role;
 
 -- Welcome post when a roster entry is first linked to an app account.
 create or replace function public.roster_intro_post() returns trigger

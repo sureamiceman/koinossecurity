@@ -513,3 +513,19 @@ main:has(.att-bar) { padding-bottom: calc(170px + var(--safe-bottom)); }
 .te-swatch.on { box-shadow: 0 0 0 2px var(--text); }
 .te-palette { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 0 2px 22px; }
 .te-palette .te-swatch.on { box-shadow: 0 0 0 3px var(--text); }
+
+/* ---------- Shift confirmations ---------- */
+.confirm-banner { border-left: 5px solid var(--gold); }
+.cb-title { font-weight: 700; margin-bottom: 4px; }
+.cb-row { display: flex; flex-direction: column; gap: 8px; padding: 10px 0; border-top: 1px solid var(--border); }
+.cb-row:first-of-type { border-top: 0; }
+.cb-actions { display: flex; gap: 8px; }
+.cb-actions .btn { flex: 1; }
+.confirm-card .row { align-items: flex-start; }
+.confirm-post { font-size: 1.2rem; }
+.confirm-q { font-weight: 700; font-size: 1.05rem; margin: 18px 0 12px; }
+.confirm-btns { display: flex; flex-direction: column; gap: 10px; }
+.confirm-btns .btn { min-height: 50px; font-size: 1.02rem; }
+.confirm-done { color: var(--medical); font-weight: 700; font-size: 1.05rem; margin: 18px 0 6px; }
+.decline-shift { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+.shift-person .badge { flex: none; }
