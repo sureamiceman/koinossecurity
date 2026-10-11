@@ -13,6 +13,9 @@ const APP_URL = 'https://koinossecurity.netlify.app';
 
 export const config = { path: '/cal/:token' };
 
+
+// Calendar apps show plain text: drop the app's **bold** / _italic_ marks.
+const unmark = (s) => String(s || '').replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '$1').replace(/(^|[^\w*])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?![\w*])/g, '$1$2').replace(/(^|[^\w])_(?=[^\s_])([^_\n]*?[^\s_])_(?!\w)/g, '$1$2');
 export default async (req, context) => {
   const raw = (context.params && context.params.token) || new URL(req.url).pathname.split('/').pop() || '';
   const token = raw.replace(/\.ics$/i, '');
@@ -84,7 +87,7 @@ export function buildIcs(feed) {
       ev.post ? `Post: ${ev.post}${ev.requires_ccw ? ' (CCW preferred)' : ''}` : null,
       `Assigned: ${ev.person || 'Open – needs a volunteer'}`,
       ev.cover_requested ? 'Cover has been requested for this post.' : null,
-      ev.notes ? `\n${ev.notes}` : null,
+      ev.notes ? `\n${unmark(ev.notes)}` : null,
       `\nSwap or cover in the app: ${APP_URL}/#/schedule`
     ].filter(Boolean).join('\n');
 

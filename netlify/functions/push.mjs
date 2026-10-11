@@ -119,7 +119,9 @@ async function loadContext(db, items) {
 // ----------------------------------------------------------------------
 // Who gets what (pure; unit-tested)
 // ----------------------------------------------------------------------
-const clip = (s, n = 140) => { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+// Notifications are plain text: drop the **bold** / _italic_ marks.
+const unmark = (s) => String(s || '').replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '$1').replace(/(^|[^\w*])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?![\w*])/g, '$1$2').replace(/(^|[^\w])_(?=[^\s_])([^_\n]*?[^\s_])_(?!\w)/g, '$1$2');
+const clip = (s, n = 140) => { s = unmark(s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 
 export function planDeliveries(items, ctx) {
   const members = new Map(ctx.profiles.filter((p) => MEMBER_ROLES.includes(p.role)).map((p) => [p.id, p]));

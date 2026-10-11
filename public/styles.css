@@ -529,3 +529,65 @@ main:has(.att-bar) { padding-bottom: calc(170px + var(--safe-bottom)); }
 .confirm-done { color: var(--medical); font-weight: 700; font-size: 1.05rem; margin: 18px 0 6px; }
 .decline-shift { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
 .shift-person .badge { flex: none; }
+
+/* ---------- Formatted text (posts, alerts, notes) ---------- */
+.rt { white-space: normal; overflow-wrap: anywhere; }
+.rt > :first-child { margin-top: 0; }
+.rt p { margin: 0 0 .6em; }
+.rt p:last-child { margin-bottom: 0; }
+.rt ul, .rt ol { margin: .2em 0 .6em; padding-left: 1.5em; }
+.rt li { margin: .15em 0; }
+.rt li > ul, .rt li > ol { margin: .15em 0; }
+.rt ol ol { list-style-type: lower-alpha; }
+.rt ol ol ol { list-style-type: lower-roman; }
+.rt a { overflow-wrap: anywhere; }
+.fmt-bar { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+.fmt-btn { border: 1px solid var(--border); background: var(--surface); border-radius: 7px; padding: 4px 9px; font-size: .82rem; font-weight: 600; cursor: pointer; min-height: 30px; }
+.fmt-btn.b { font-weight: 800; }
+.fmt-btn.i { font-style: italic; font-family: Georgia, serif; }
+.fmt-btn:active { background: var(--bg); }
+.fmt-hint { color: var(--muted); font-size: .72rem; margin-left: 4px; }
+@media (max-width: 420px) { .fmt-hint { display: none; } }
+
+/* ---------- SOP documents (formatted) ---------- */
+.rt-doc h2 { font-size: 1.15rem; margin: 1.1em 0 .4em; }
+.rt-doc h3 { font-size: 1.02rem; margin: 1em 0 .35em; }
+.rt-doc li > p { margin: 0; }
+.rt-doc mark { background: #fff1a8; color: inherit; padding: 0 2px; border-radius: 3px; }
+@media (prefers-color-scheme: dark) { .rt-doc mark { background: #6b5a00; } }
+.rt-doc blockquote { margin: .6em 0; padding: 8px 12px; border-left: 4px solid var(--caution); background: var(--caution-bg); border-radius: 0 8px 8px 0; }
+.rt-doc blockquote p { margin: 0; }
+.rt-doc hr { border: 0; border-top: 1px solid var(--border); margin: 1em 0; }
+.rt-table { overflow-x: auto; margin: .6em 0; -webkit-overflow-scrolling: touch; }
+.rt table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+.rt th, .rt td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; vertical-align: top; min-width: 80px; }
+.rt th { background: var(--bg); font-weight: 700; }
+.rt th p, .rt td p { margin: 0; }
+.sop-detail .sop-body { margin-top: 14px; font-size: 1.02rem; line-height: 1.6; }
+
+/* Admin SOP editor */
+dialog.wide { width: min(940px, 100vw); max-width: 100vw; }
+.custom-field { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.sop-ed-bar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 6px; border-bottom: 1px solid var(--border); background: var(--bg); border-radius: 10px 10px 0 0; position: sticky; top: 52px; z-index: 2; }
+.sop-ed-bar.table-bar { border-radius: 0; top: auto; position: static; background: var(--info-bg); }
+.sop-ed-btn { border: 1px solid var(--border); background: var(--surface); border-radius: 7px; padding: 4px 9px; min-height: 32px; min-width: 32px; font-size: .85rem; font-weight: 600; cursor: pointer; color: inherit; }
+.sop-ed-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.sop-ed-btn.on mark { background: transparent; color: #fff; }
+.sop-ed-btn:disabled { opacity: .35; cursor: default; }
+.sop-ed-btn mark { background: #fff1a8; padding: 0 3px; border-radius: 3px; color: #16202c; }
+.sop-ed-style { border: 1px solid var(--border); border-radius: 7px; padding: 5px 6px; background: var(--surface); min-height: 32px; font-size: .85rem; }
+.sop-ed-sep { width: 1px; height: 22px; background: var(--border); margin: 0 3px; }
+.sop-ed-label { font-size: .8rem; font-weight: 700; color: var(--muted); margin: 0 4px; }
+.sop-ed-surface { padding: 4px 14px 14px; }
+.sop-ed { min-height: 46vh; outline: none; font-size: 1rem; line-height: 1.55; padding-top: 10px; }
+.ProseMirror { white-space: pre-wrap; word-wrap: break-word; position: relative; }
+.ProseMirror p.is-editor-empty:first-child::before { content: attr(data-placeholder); color: var(--muted); float: left; height: 0; pointer-events: none; }
+.ProseMirror .selectedCell { background: var(--info-bg); }
+.ProseMirror table { table-layout: fixed; }
+.ProseMirror-gapcursor { display: none; pointer-events: none; position: absolute; }
+.ProseMirror-gapcursor:after { content: ''; display: block; position: absolute; top: -2px; width: 20px; border-top: 1px solid var(--text); animation: ProseMirror-cursor-blink 1.1s steps(2, start) infinite; }
+@keyframes ProseMirror-cursor-blink { to { visibility: hidden; } }
+.ProseMirror-focused .ProseMirror-gapcursor { display: block; }
+.ProseMirror-hideselection *::selection { background: transparent; }
+.field .sop-ed-style { width: auto; flex: none; }
+.sop-ed.rt-doc h2:first-child, .sop-ed.rt-doc p:first-child { margin-top: 0; }
