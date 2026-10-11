@@ -1,7 +1,7 @@
 // Koinos Security service worker.
 // App files: network first (always fresh when online), cached copy when offline.
 // Supabase data requests are never touched here; the app keeps its own offline copy.
-const CACHE = 'koinos-shell-v3';
+const CACHE = 'koinos-shell-v4';
 const SHELL = [
   '/', '/index.html', '/styles.css', '/app.js', '/config.js',
   '/vendor/supabase.js', '/manifest.webmanifest',

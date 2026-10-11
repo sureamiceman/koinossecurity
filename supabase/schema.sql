@@ -204,6 +204,15 @@ create table if not exists public.sops (
   prev_updated_by  uuid references public.profiles(id) on delete set null
 );
 
+-- SOP text is either plain text with simple marks ('text', the original
+-- format) or HTML from the admin editor ('html'). The app shows HTML through
+-- an allow-list, so nothing in it can run.
+alter table public.sops add column if not exists format text not null default 'text';
+alter table public.sops add column if not exists prev_format text;
+do $$ begin
+  alter table public.sops add constraint sops_format_check check (format in ('text','html'));
+exception when duplicate_object then null; end $$;
+
 -- When the title, category or text changes, the old copy becomes the
 -- "previous version". Reverting is just saving the previous copy back,
 -- which in turn keeps the version you reverted away from (so an accidental
@@ -214,20 +223,23 @@ begin
   if tg_op = 'UPDATE' and current_setting('koinos.sop_retag', true) = 'on' then
     -- A tab rename/removal moved this SOP; that isn't an edit.
     new.prev_title := old.prev_title; new.prev_category := old.prev_category; new.prev_body := old.prev_body;
+    new.prev_format := old.prev_format;
     new.prev_updated_at := old.prev_updated_at; new.prev_updated_by := old.prev_updated_by;
   elsif tg_op = 'INSERT' then
-    new.prev_title := null; new.prev_category := null; new.prev_body := null;
+    new.prev_title := null; new.prev_category := null; new.prev_body := null; new.prev_format := null;
     new.prev_updated_at := null; new.prev_updated_by := null;
-  elsif (new.title, new.category, new.body) is distinct from (old.title, old.category, old.body) then
+  elsif (new.title, new.category, new.body, new.format) is distinct from (old.title, old.category, old.body, old.format) then
     new.prev_title      := old.title;
     new.prev_category   := old.category;
     new.prev_body       := old.body;
+    new.prev_format     := old.format;
     new.prev_updated_at := old.updated_at;
     new.prev_updated_by := old.updated_by;
   else
     new.prev_title      := old.prev_title;
     new.prev_category   := old.prev_category;
     new.prev_body       := old.prev_body;
+    new.prev_format     := old.prev_format;
     new.prev_updated_at := old.prev_updated_at;
     new.prev_updated_by := old.prev_updated_by;
   end if;

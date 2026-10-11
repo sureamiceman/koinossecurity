@@ -148,6 +148,235 @@
   const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e || '');
 
   // ------------------------------------------------------------------
+  // Simple formatting for posts, replies, alerts and notes. Text stays plain
+  // text (so search, notifications and the offline copy keep working) with a
+  // few marks the toolbar adds for you:
+  //   **bold**   *italic* or _italic_   - bullet   1. numbered   (indent = sub-list)
+  // Web links become tappable. Everything is built as text nodes: no HTML
+  // typed into a post can ever run.
+  // ------------------------------------------------------------------
+  const LIST_RE = /^([ \t]*)(?:([-*•])|(\d{1,3})[.)])[ \t]+(.*)$/;
+  const indentOf = (ws) => { let n = 0; for (const c of ws) n += c === '\t' ? 2 : 1; return Math.floor(n / 2); };
+
+  function inlineNodes(text) {
+    const out = [];
+    // bold | italic with * | italic with _ | web link
+    const re = /\*\*(?=\S)([\s\S]*?\S)\*\*|(^|[^\w*])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?![\w*])|(^|[^\w])_(?=[^\s_])([^_\n]*?[^\s_])_(?!\w)|(https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]'])/g;
+    let last = 0, m;
+    while ((m = re.exec(text))) {
+      let start = m.index;
+      const lead = m[2] != null ? m[2] : m[4] != null ? m[4] : '';
+      start += lead.length;
+      if (start > last) out.push(text.slice(last, start));
+      if (m[1] != null) out.push(h('strong', {}, inlineNodes(m[1])));
+      else if (m[3] != null) out.push(h('em', {}, inlineNodes(m[3])));
+      else if (m[5] != null) out.push(h('em', {}, inlineNodes(m[5])));
+      else if (m[6] != null) out.push(h('a', { href: m[6], target: '_blank', rel: 'noopener noreferrer' }, m[6]));
+      last = re.lastIndex;
+    }
+    if (last < text.length) out.push(text.slice(last));
+    return out;
+  }
+
+  // Text with marks → a block of paragraphs and (nested) lists.
+  function richText(text, cls) {
+    const root = h('div', { class: 'rt' + (cls ? ' ' + cls : '') });
+    const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+    let para = null;
+    let stack = [];   // open lists: { el, level, type }
+    const closeLists = () => { stack = []; };
+    const lineBreakTo = (el, nodes) => { if (el.childNodes.length) el.append(h('br')); append(el, nodes); };
+    for (const line of lines) {
+      const m = LIST_RE.exec(line);
+      if (m) {
+        para = null;
+        const level = indentOf(m[1]);
+        const type = m[3] != null ? 'ol' : 'ul';
+        while (stack.length && (stack[stack.length - 1].level > level || (stack[stack.length - 1].level === level && stack[stack.length - 1].type !== type))) stack.pop();
+        let top = stack[stack.length - 1];
+        if (!top || top.level < level) {
+          // A top-level numbered list may start at another number (e.g. "5."); sub-lists always start at 1.
+          const list = h(type, type === 'ol' && level === 0 && !stack.length && m[3] !== '1' ? { start: m[3] } : {});
+          const parentLi = top && top.el.lastElementChild;
+          (parentLi || root).append(list);
+          top = { el: list, level, type };
+          stack.push(top);
+        }
+        top.el.append(h('li', {}, inlineNodes(m[4])));
+      } else if (!line.trim()) {
+        para = null;
+        closeLists();
+      } else {
+        const lead = /^[ \t]+/.exec(line);
+        if (stack.length && lead) {   // continuation of a list item
+          lineBreakTo(stack[stack.length - 1].el.lastElementChild, inlineNodes(line.trim()));
+          continue;
+        }
+        closeLists();
+        if (!para) { para = h('p'); root.append(para); }
+        lineBreakTo(para, inlineNodes(line));
+      }
+    }
+    return root;
+  }
+
+  // For previews and search: the words without the marks.
+  function plainText(text) {
+    return String(text || '')
+      .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '$1')
+      .replace(/(^|[^\w*])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?![\w*])/g, '$1$2')
+      .replace(/(^|[^\w])_(?=[^\s_])([^_\n]*?[^\s_])_(?!\w)/g, '$1$2');
+  }
+
+  // Formatted SOPs are stored as HTML from the admin editor. Shown through
+  // this allow-list: only these tags (and links to web/mail/phone) survive,
+  // rebuilt as new elements, so nothing in the HTML can ever run.
+  const SAFE_TAGS = new Set(['P', 'BR', 'H2', 'H3', 'H4', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'MARK', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'HR', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'A']);
+  const DROP_TAGS = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'TEMPLATE', 'SVG', 'MATH', 'NOSCRIPT', 'FORM', 'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'IMG', 'VIDEO', 'AUDIO', 'LINK', 'META', 'COLGROUP', 'COL']);
+  function safeHtml(html, cls) {
+    // (style attributes are renamed first, so the site's no-inline-styles rule never has to step in)
+    const src = new DOMParser().parseFromString(String(html || '').replace(/\sstyle\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, ' data-st=$1'), 'text/html').body;
+    const copy = (from, to) => {
+      for (const n of from.childNodes) {
+        if (n.nodeType === 3) { to.append(n.textContent); continue; }
+        if (n.nodeType !== 1 || DROP_TAGS.has(n.tagName)) continue;
+        if (!SAFE_TAGS.has(n.tagName)) { copy(n, to); continue; }   // unknown wrapper: keep its text
+        const el = document.createElement(n.tagName === 'B' ? 'strong' : n.tagName === 'I' ? 'em' : n.tagName.toLowerCase());
+        if (n.tagName === 'A') {
+          const href = (n.getAttribute('href') || '').trim();
+          if (/^(https?:\/\/|mailto:|tel:)/i.test(href)) { el.setAttribute('href', href); el.setAttribute('target', '_blank'); el.setAttribute('rel', 'noopener noreferrer'); }
+        }
+        if (n.tagName === 'OL' && /^\d{1,4}$/.test(n.getAttribute('start') || '')) el.setAttribute('start', n.getAttribute('start'));
+        if ((n.tagName === 'TD' || n.tagName === 'TH')) for (const a of ['colspan', 'rowspan']) if (/^\d{1,2}$/.test(n.getAttribute(a) || '')) el.setAttribute(a, n.getAttribute(a));
+        copy(n, el);
+        to.append(n.tagName === 'TABLE' ? h('div', { class: 'rt-table' }, el) : el);
+      }
+    };
+    const root = h('div', { class: 'rt rt-doc' + (cls ? ' ' + cls : '') });
+    copy(src, root);
+    return root;
+  }
+  // An SOP body (or its previous version) as something to show / search / preview.
+  const sopBody = (body, format, cls) => (format === 'html' ? safeHtml(body, cls) : richText(body, cls));
+  const sopPlainCache = new Map();
+  function sopPlain(body, format) {
+    if (format !== 'html') return plainText(body);
+    const key = body || '';
+    if (!sopPlainCache.has(key)) {
+      const d = safeHtml(key);
+      for (const b of d.querySelectorAll('p, li, h2, h3, h4, td, th, br, tr')) b.append('\n');
+      sopPlainCache.set(key, d.textContent.replace(/[ \t]+\n/g, '\n').replace(/\n{2,}/g, '\n').trim());
+      if (sopPlainCache.size > 300) sopPlainCache.delete(sopPlainCache.keys().next().value);
+    }
+    return sopPlainCache.get(key);
+  }
+  // Plain/marked text → HTML for the editor (old SOPs, "Make SOP" from a thread).
+  const textToHtml = (text) => richText(text).innerHTML;
+
+  // Small toolbar above a text box: Bold, Italic, bullets, numbers. Tab /
+  // Shift-Tab indent list lines; Enter continues a list (twice ends it).
+  function formatBar(ta) {
+    const wrapSel = (mark) => {
+      const { selectionStart: a, selectionEnd: b, value: v } = ta;
+      const sel = v.slice(a, b);
+      if (sel.startsWith(mark) && sel.endsWith(mark) && sel.length > mark.length * 2) {
+        ta.setRangeText(sel.slice(mark.length, -mark.length), a, b, 'select');
+      } else if (v.slice(a - mark.length, a) === mark && v.slice(b, b + mark.length) === mark) {
+        ta.setRangeText(sel, a - mark.length, b + mark.length, 'select');
+      } else {
+        const lead = sel.match(/^\s*/)[0], trail = sel.match(/\s*$/)[0];
+        const core = sel.trim() || (mark === '**' ? 'bold text' : 'italic text');
+        ta.setRangeText(lead + mark + core + mark + trail, a, b, 'end');
+        const end = a + lead.length + mark.length;
+        ta.setSelectionRange(end, end + core.length);
+      }
+      ta.focus();
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    const lineRange = () => {
+      const v = ta.value;
+      const a = v.lastIndexOf('\n', ta.selectionStart - 1) + 1;
+      let b = v.indexOf('\n', Math.max(ta.selectionEnd - (ta.selectionEnd > ta.selectionStart && v[ta.selectionEnd - 1] === '\n' ? 1 : 0), ta.selectionStart));
+      if (b < 0) b = v.length;
+      return [a, b];
+    };
+    const toggleList = (kind) => {
+      const [a, b] = lineRange();
+      const lines = ta.value.slice(a, b).split('\n');
+      const isKind = (l) => { const m = LIST_RE.exec(l); return m && (kind === 'ol' ? m[3] != null : m[2] != null); };
+      if (!lines.some((l) => l.trim())) {   // empty line: start a list here
+        ta.setRangeText(kind === 'ol' ? '1. ' : '- ', ta.selectionStart, ta.selectionEnd, 'end');
+        ta.focus();
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        return;
+      }
+      const all = lines.filter((l) => l.trim()).every(isKind);
+      let n = 0;
+      const out = lines.map((l) => {
+        if (!l.trim()) return l;
+        const m = LIST_RE.exec(l);
+        const ws = m ? m[1] : (l.match(/^[ \t]*/)[0]);
+        const body = m ? m[4] : l.trim();
+        if (all) return ws + body;
+        n++;
+        return ws + (kind === 'ol' ? `${n}. ` : '- ') + body;
+      });
+      ta.setRangeText(out.join('\n'), a, b, 'end');
+      ta.focus();
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab') {
+        const [a, b] = lineRange();
+        const lines = ta.value.slice(a, b).split('\n');
+        if (!lines.some((l) => LIST_RE.test(l))) return;   // not in a list: Tab moves on as usual
+        e.preventDefault();
+        // Indenting a numbered step makes it the first sub-step ("1.");
+        // outdenting continues the numbering of the list it rejoins.
+        const before = ta.value.slice(0, a).split('\n');
+        const nextNumber = (ws) => {
+          for (let i = before.length - 1; i >= 0; i--) {
+            const m = LIST_RE.exec(before[i]);
+            if (!m) { if (before[i].trim()) break; continue; }
+            if (indentOf(m[1]) === indentOf(ws)) return m[3] != null ? Number(m[3]) + 1 : null;
+            if (indentOf(m[1]) < indentOf(ws)) break;
+          }
+          return 1;
+        };
+        const out = lines.map((l) => {
+          if (!LIST_RE.test(l)) return l;
+          if (!e.shiftKey) return '  ' + l.replace(/^([ \t]*)\d{1,3}([.)])/, '$11$2');
+          const up = l.replace(/^( {1,2}|\t)/, '');
+          const m = LIST_RE.exec(up);
+          const n = m && m[3] != null ? nextNumber(m[1]) : null;
+          return n ? up.replace(/^([ \t]*)\d{1,3}([.)])/, `$1${n}$2`) : up;
+        });
+        ta.setRangeText(out.join('\n'), a, b, 'end');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      } else if (e.key === 'Enter' && !e.shiftKey && ta.selectionStart === ta.selectionEnd) {
+        const [a] = lineRange();
+        const line = ta.value.slice(a, ta.selectionStart);
+        const m = LIST_RE.exec(line);
+        if (!m) return;
+        e.preventDefault();
+        if (!m[4].trim()) { ta.setRangeText('', a, ta.selectionStart, 'end'); }   // empty item: end the list
+        else ta.setRangeText('\n' + m[1] + (m[3] != null ? `${Number(m[3]) + 1}. ` : `${m[2]} `), ta.selectionStart, ta.selectionStart, 'end');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      } else if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'b' || e.key === 'i')) {
+        e.preventDefault();
+        wrapSel(e.key === 'b' ? '**' : '_');
+      }
+    });
+    const btn = (label, title, fn, cls) => h('button', { type: 'button', class: 'fmt-btn' + (cls ? ' ' + cls : ''), title, 'aria-label': title, onmousedown: (e) => e.preventDefault(), onclick: fn }, label);
+    return h('div', { class: 'fmt-bar', role: 'toolbar', 'aria-label': 'Formatting' },
+      btn('B', 'Bold (Ctrl/⌘+B)', () => wrapSel('**'), 'b'),
+      btn('I', 'Italic (Ctrl/⌘+I)', () => wrapSel('_'), 'i'),
+      btn('• List', 'Bulleted list', () => toggleList('ul')),
+      btn('1. List', 'Numbered list', () => toggleList('ol')),
+      h('span', { class: 'fmt-hint' }, 'Tab indents list items'));
+  }
+
+  // ------------------------------------------------------------------
   // Offline copy (kept on this device only; cleared on sign-out)
   // ------------------------------------------------------------------
   const CP = 'koinos:';
@@ -350,8 +579,9 @@
   // Generic form dialog. Field types: text (default), textarea, select, checkbox,
   // number, date, time, tel, email, password, photo, weekdays, posts.
   // A field may have visible(values) to show/hide it as other fields change.
-  function openForm({ title, fields, values = {}, submitLabel = 'Save', cancelLabel = 'Cancel', onSubmit, onDelete, deleteLabel = 'Delete', deleteConfirm, intro }) {
-    const dlg = h('dialog', {});
+  function openForm({ title, fields, values = {}, submitLabel = 'Save', cancelLabel = 'Cancel', onSubmit, onDelete, deleteLabel = 'Delete', deleteConfirm, intro, wide }) {
+    const dlg = h('dialog', { class: wide ? 'wide' : null });
+    const cleanups = [];
     const getters = {};
     const wraps = {};
     const photo = { file: null, remove: false };
@@ -404,6 +634,12 @@
         });
         getters[f.name] = () => [...sel].sort();
         wrap = h('div', { class: 'field' }, h('label', {}, f.label), row, f.hint && h('div', { class: 'hint' }, f.hint));
+      } else if (f.type === 'custom') {
+        const box = h('div', { class: 'custom-field' });
+        wrap = h('div', { class: 'field' }, h('label', {}, f.label), box, f.hint && h('div', { class: 'hint' }, f.hint));
+        const c = f.build(box);
+        getters[f.name] = c.get;
+        if (c.destroy) cleanups.push(c.destroy);
       } else if (f.type === 'posts') {
         const editor = postsEditor(values[f.name] || [], f);
         getters[f.name] = editor.get;
@@ -419,7 +655,7 @@
           : f.type === 'password' ? input.value : input.value.trim();
         getters[f.name].el = input;
         wrap = h('div', { class: 'field' },
-          h('label', { for: id }, f.label + (f.required ? ' *' : '')), input,
+          h('label', { for: id }, f.label + (f.required ? ' *' : '')), f.rich ? formatBar(input) : null, input,
           f.list ? h('datalist', { id: id + '_list' }, f.list.map((o) => h('option', { value: o }))) : null,
           f.hint && h('div', { class: 'hint' }, typeof f.hint === 'function' ? '' : f.hint));
       }
@@ -485,7 +721,19 @@
     body, foot);
 
     dlg.append(form);
-    dlg.addEventListener('close', () => dlg.remove());
+    dlg.addEventListener('close', () => { for (const c of cleanups) try { c(); } catch { /* already gone */ } dlg.remove(); });
+    // Long forms (the SOP editor): don't lose work to a stray Esc, ✕ or Cancel.
+    if (wide) {
+      const start = JSON.stringify(collect());
+      const keep = () => JSON.stringify(collect()) !== start && !confirm('Close without saving your changes?');
+      dlg.addEventListener('cancel', (e) => { if (keep()) e.preventDefault(); });
+      for (const b of [form.querySelector('.dlg-head .icon-btn'), [...foot.querySelectorAll('button')].find((x) => x.textContent === cancelLabel)]) {
+        if (!b) continue;
+        const guarded = b.cloneNode(true);   // a copy without the plain "close" handler
+        guarded.addEventListener('click', (e) => { e.preventDefault(); if (!keep()) dlg.close(); });
+        b.replaceWith(guarded);
+      }
+    }
     document.body.append(dlg);
     dlg.showModal();
   }
@@ -817,7 +1065,7 @@
       url ? h('img', { class: 'bulletin-photo', src: url, alt: 'Bulletin photo', loading: 'lazy', onclick: () => viewPhoto(url) })
         : (b.photo_path ? h('div', { class: 'muted small' }, 'Photo available when online') : null),
       h('h3', {}, b.title),
-      b.body ? h('p', { class: 'body-text' }, b.body) : null,
+      b.body ? richText(b.body, 'body-text') : null,
       h('div', { class: 'meta' },
         [nameOf(b.created_by) && `Posted by ${nameOf(b.created_by)}`, b.expires_at && `${live ? 'Expires' : 'Expired'} ${fmtDateTime(b.expires_at)}`].filter(Boolean).join(' · ')),
       isAdmin() ? h('div', { class: 'actions' },
@@ -842,7 +1090,7 @@
         { name: 'kind', label: 'Type', type: 'select', options: [['bulletin', 'Safety bulletin'], ['bolo', 'BOLO (be on the lookout)']] },
         { name: 'priority', label: 'Priority', type: 'select', options: [['info', 'Info'], ['caution', 'Caution'], ['urgent', 'Urgent']] },
         { name: 'title', label: 'Title', required: true, placeholder: 'e.g. Grey sedan seen circling lot' },
-        { name: 'body', label: 'Details', type: 'textarea', rows: 6, placeholder: 'Description, what to do, who to notify…' },
+        { name: 'body', label: 'Details', type: 'textarea', rich: true, rows: 6, placeholder: 'Description, what to do, who to notify…' },
         { name: 'photo', label: 'Photo', type: 'photo', currentUrl: b.photo_path ? state.photoUrls[b.photo_path] : null },
         { name: 'expires_at', label: 'Expires (optional)', type: 'datetime-local', hint: 'Leave blank to keep it up until you archive it.' },
         ...(isNew ? [] : [{ name: 'active', label: 'Active', type: 'checkbox' }])
@@ -936,7 +1184,7 @@
 
     let panel;
     if (searching) {
-      const rows = state.data.sops.filter((s) => `${s.title} ${s.category} ${s.body}`.toLowerCase().includes(ql))
+      const rows = state.data.sops.filter((s) => `${s.title} ${s.category} ${sopPlain(s.body, s.format)}`.toLowerCase().includes(ql))
         .sort((a, b) => (tabs.findIndex((t) => t.name === a.category) - tabs.findIndex((t) => t.name === b.category)) || sopSort(a, b));
       panel = h('section', { class: 'sop-panel tc-search' },
         h('div', { class: 'sop-panel-head' }, h('h2', {}, 'Search results'), h('span', { class: 'muted small' }, `${rows.length} found in all tabs`)),
@@ -960,7 +1208,7 @@
       h('div', { class: 'grow' },
         showTab ? h('span', { class: `sop-chip tc-${t.color}` }, t.name) : null,
         h('div', { class: 'title' }, s.title),
-        h('div', { class: 'sub' }, (s.body || '').split('\n').find((l) => l.trim()) || '')),
+        h('div', { class: 'sub' }, sopPlain(s.body, s.format).split('\n').find((l) => l.trim()) || '')),
       icon('chev'));
   }
 
@@ -1042,7 +1290,7 @@
         h('span', { class: `sop-chip tc-${sopTabOf(s.category).color}` }, s.category || 'General'),
         h('h2', {}, s.title),
         h('div', { class: 'meta' }, `Updated ${fmtDateTime(s.updated_at)}${who ? ' by ' + who : ''}`),
-        h('div', { class: 'body-text' }, s.body || ''),
+        sopBody(s.body, s.format, 'sop-body'),
         isAdmin() && s.prev_body != null ? h('div', { class: 'actions' },
           h('button', { class: 'btn small', onclick: () => revertSop(s) }, 'Revert to previous version')) : null)
     };
@@ -1057,7 +1305,7 @@
         h('div', { class: 'meta' }, `Saved ${fmtDateTime(s.prev_updated_at)}${who ? ' by ' + who : ''}`),
         h('h3', {}, s.prev_title),
         s.prev_category !== s.category ? h('div', { class: 'muted small' }, 'Category: ' + s.prev_category) : null,
-        h('div', { class: 'body-text' }, s.prev_body)
+        sopBody(s.prev_body, s.prev_format, 'sop-body')
       ],
       buttons: (close) => [
         h('button', { class: 'btn', onclick: close }, 'Cancel'),
@@ -1065,7 +1313,9 @@
           class: 'btn primary', onclick: async (e) => {
             e.currentTarget.disabled = true;
             try {
-              await saveRow('sops', s.id, { title: s.prev_title, category: s.prev_category, body: s.prev_body });
+              const row = { title: s.prev_title, category: s.prev_category, body: s.prev_body };
+              if ('format' in s) row.format = s.prev_format || 'text';
+              await saveRow('sops', s.id, row);
               close();
               await afterSave('sops', 'Reverted to previous version');
             } catch (ex) { toast(friendlyError(ex)); e.currentTarget.disabled = false; }
@@ -1075,10 +1325,34 @@
     });
   }
 
-  function editSop(s, prefill, fromThread) {
+  // The editor (≈140 KB) is only downloaded when an admin opens it.
+  let sopEditorLoading = null;
+  function loadSopEditor() {
+    if (window.KoinosEditor) return Promise.resolve();
+    if (!sopEditorLoading) {
+      sopEditorLoading = new Promise((resolve, reject) => {
+        const tag = h('script', { src: '/vendor/sop-editor.js?v=' + encodeURIComponent(cfg.appVersion) });
+        tag.addEventListener('load', () => resolve());
+        tag.addEventListener('error', () => { sopEditorLoading = null; tag.remove(); reject(new Error('Could not load the editor. Check your connection and try again.')); });
+        document.head.append(tag);
+      });
+    }
+    return sopEditorLoading;
+  }
+
+  async function editSop(s, prefill, fromThread) {
     const isNew = !s;
     s = s || {};
+    const fancy = !s.id || 'format' in s;   // the database has been updated for formatted SOPs
+    if (fancy) {
+      const t = setTimeout(() => toast('Loading the editor…'), 300);
+      try { await loadSopEditor(); } catch (e) { clearTimeout(t); toast(friendlyError(e), 5000); return; }
+      clearTimeout(t);
+    }
+    const startHtml = !fancy ? null : isNew ? (prefill && prefill.body ? textToHtml(prefill.body) : '')
+      : s.format === 'html' ? s.body : textToHtml(s.body);
     openForm({
+      wide: fancy,
       title: isNew ? 'New SOP' : 'Edit SOP',
       intro: fromThread ? h('p', { class: 'muted small' }, 'Started from a board thread. Tidy it up, then save. The thread itself is not changed.') : null,
       values: isNew && prefill ? prefill : s,
@@ -1086,10 +1360,14 @@
         { name: 'title', label: 'Title', required: true, placeholder: 'e.g. Medical emergency response' },
         { name: 'category', label: 'Tab', type: 'select', options: sopTabs().map((t) => [t.name, t.name]), default: currentSopTab().name,
           hint: isNew ? 'Starts in the tab you were looking at. Change it if this belongs somewhere else.' : null },
-        { name: 'body', label: 'Procedure', type: 'textarea', rows: 14, placeholder: '1. First step\n2. Second step\n…' },
+        fancy ? { name: 'body', label: 'Procedure', type: 'custom', build: (box) => {
+          const ed = window.KoinosEditor.create(box, { html: startHtml, placeholder: 'Write the procedure. Tip: paste from Word or Google Docs to keep lists and tables.' });
+          return { get: () => (ed.isEmpty() ? '' : ed.getHTML()), destroy: () => ed.destroy() };
+        } } : { name: 'body', label: 'Procedure', type: 'textarea', rich: true, rows: 14, placeholder: '1. First step\n2. Second step\n…' },
         { name: 'sort_order', label: 'Sort order', type: 'number', default: 0, inputmode: 'numeric', hint: 'Lower numbers appear first within the category.' }
       ],
       onSubmit: async (v) => {
+        if (fancy) v.format = 'html';
         await saveRow('sops', s.id, v);
         if (isNew) { const t = sopTabOf(v.category); state.sopTab = tabKey(t); cacheSet('sopTab', state.sopTab); }
         await afterSave('sops', isNew ? (fromThread ? 'SOP created from the thread' : 'SOP added') : 'SOP saved');
@@ -1124,7 +1402,7 @@
             h('div', { class: 'title' }, c.name),
             c.organization ? h('div', { class: 'sub' }, c.organization) : null,
             c.phone ? h('div', { class: 'sub' }, c.phone + (c.alt_phone ? ' · ' + c.alt_phone : '')) : null,
-            c.notes ? h('div', { class: 'sub body-text' }, c.notes) : null,
+            c.notes ? richText(c.notes, 'sub body-text') : null,
             isAdmin() ? h('button', { class: 'btn small', onclick: () => editContact(c) }, 'Edit') : null),
           h('div', { class: 'phones' },
             c.phone ? callBtn(c.phone) : null,
@@ -1505,7 +1783,7 @@
           series ? h('div', { class: 'muted tiny repeat-line' }, '↻ ' + repeatLabel(series) + (e.is_exception ? ' · changed for this date' : '')) : null,
           open && upcoming ? h('span', { class: 'badge caution' }, `${open} open post${open > 1 ? 's' : ''}`) : null,
           upcoming ? confirmSummary(allShifts) : null)),
-      e.notes ? h('p', { class: 'body-text small' }, e.notes) : null,
+      e.notes ? richText(e.notes, 'body-text small') : null,
       h('div', { class: 'shift-list' },
         shifts.length ? shifts.map((s) => shiftRow(s, e, me, upcoming))
           : h('div', { class: 'muted small shift-empty' }, isAdmin() ? 'No posts yet — add one below.' : 'No posts assigned yet.')),
@@ -1632,7 +1910,7 @@
           h('div', {}, e.title),
           h('div', { class: 'muted small' }, when + (e.location ? ' · ' + e.location : ''))),
         h('p', { class: 'muted small' }, 'This posts on the team board and marks your post "Needs cover" on the schedule. You stay on it until someone taps I\'ll cover.')),
-      fields: [{ name: 'why', label: 'Why do you need cover?', type: 'textarea', rows: 4, required: true, placeholder: 'e.g. Out of town that weekend' }],
+      fields: [{ name: 'why', label: 'Why do you need cover?', type: 'textarea', rich: true, rows: 4, required: true, placeholder: 'e.g. Out of town that weekend' }],
       submitLabel: 'Post to the team',
       onSubmit: async (v) => {
         const body = `Can anyone cover ${s.post || 'my post'} at ${e.title} on ${when}?\n\n${v.why}`;
@@ -1767,7 +2045,7 @@
       { name: 'start', label: 'Security starts', type: 'time', required: true },
       { name: 'end', label: 'Security ends', type: 'time', required: true, hint: 'An end time earlier than the start is treated as the next day.' },
       { name: 'location', label: 'Location', placeholder: 'Campus or building' },
-      { name: 'notes', label: 'Notes for the team', type: 'textarea', rows: 3 },
+      { name: 'notes', label: 'Notes for the team', type: 'textarea', rich: true, rows: 3 },
       ...(showRepeat ? [
         { name: 'repeat', label: 'Repeat', type: 'select', options: isSeriesEdit ? REPEAT_OPTIONS.slice(1) : REPEAT_OPTIONS },
         { name: 'weekdays', label: 'On these days', type: 'weekdays', visible: (v) => v.repeat === 'weekly' || v.repeat === 'biweekly' },
@@ -2126,7 +2404,7 @@
           h('div', { class: 'muted tiny' }, relTime(p.created_at) + (p.edited_at ? ' · edited' : ''))),
         p.pinned ? h('span', { class: 'badge bolo' }, 'Pinned') : null,
         p.kind !== 'general' ? h('span', { class: 'badge' + (p.kind === 'swap' ? ' caution' : ' medical') }, KIND_LABELS[p.kind]) : null),
-      body ? h('p', { class: 'body-text post-body' }, body) : null,
+      body ? richText(body, 'body-text post-body') : null,
       p.kind === 'intro' ? introBox(p) : null,
       p.kind === 'swap' ? swapBox(p) : null,
       photoBlock(p.photo_path),
@@ -2158,7 +2436,7 @@
       authorAvatar(r.author_id),
       h('div', { class: 'grow' },
         h('div', {}, h('strong', {}, authorName(r.author_id)), h('span', { class: 'muted tiny' }, ' · ' + relTime(r.created_at) + (r.edited_at ? ' · edited' : ''))),
-        r.body ? h('div', { class: 'body-text post-body' }, r.body) : null,
+        r.body ? richText(r.body, 'body-text post-body') : null,
         photoBlock(r.photo_path),
         canEditBoard(r) || canDeleteBoard(r) ? h('div', { class: 'reply-tools' },
           canEditBoard(r) ? h('button', { class: 'linkish', onclick: () => editReply(r) }, 'Edit') : null,
@@ -2195,7 +2473,7 @@
         toast(friendlyError(e), 5000);
       }
     } }, 'Send');
-    return h('div', { class: 'card reply-box' }, ta, file,
+    return h('div', { class: 'card reply-box' }, formatBar(ta), ta, file,
       h('div', { class: 'row' }, fileLabel, d.file ? h('button', { class: 'linkish', onclick: () => { d.file = null; render(); } }, 'Remove photo') : null, h('div', { class: 'grow' }), send));
   }
 
@@ -2225,7 +2503,7 @@
           options: mine.length ? mine.map(({ s, e }) => [s.id, `${new Date(s.starts_at || e.starts_at).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} · ${s.post || 'Post'} · ${e.title}`])
             : [['', myRoster() ? 'You have no upcoming posts to offer' : 'Your sign-in is not linked to the roster yet']],
           hint: 'The schedule marks it "Needs cover" and anyone who takes it is put on the schedule automatically.' },
-        { name: 'body', label: 'Message', type: 'textarea', rows: 5, placeholder: 'Write something to the team…' },
+        { name: 'body', label: 'Message', type: 'textarea', rich: true, rows: 5, placeholder: 'Write something to the team…' },
         { name: 'photo', label: 'Photo (optional)', type: 'photo', visible: (v) => v.kind !== 'swap' }
       ],
       submitLabel: 'Post',
@@ -2255,7 +2533,7 @@
       title: 'Edit post',
       values: { body: p.body },
       fields: [
-        { name: 'body', label: 'Message', type: 'textarea', rows: 6 },
+        { name: 'body', label: 'Message', type: 'textarea', rich: true, rows: 6 },
         { name: 'photo', label: 'Photo', type: 'photo', currentUrl: p.photo_path ? state.photoUrls[p.photo_path] : null }
       ],
       onSubmit: async (v, photo) => {
@@ -2274,7 +2552,7 @@
     openForm({
       title: 'Edit reply',
       values: { body: r.body },
-      fields: [{ name: 'body', label: 'Reply', type: 'textarea', rows: 4 }],
+      fields: [{ name: 'body', label: 'Reply', type: 'textarea', rich: true, rows: 4 }],
       onSubmit: async (v) => {
         const { error } = await sb.from('post_replies').update({ body: v.body }).eq('id', r.id);
         if (error) throw error;

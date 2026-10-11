@@ -1,0 +1,17 @@
+{
+  "name": "koinos-sop-editor",
+  "private": true,
+  "description": "Builds public/vendor/sop-editor.js (the admin SOP editor). Only needed when changing the editor: npm install && npm run build. The app itself still has no build step.",
+  "scripts": {
+    "build": "esbuild src/editor.mjs --bundle --minify --format=iife --global-name=KoinosEditor --target=es2019 --legal-comments=eof --outfile=../../public/vendor/sop-editor.js"
+  },
+  "devDependencies": {
+    "@tiptap/core": "3.31.4",
+    "@tiptap/pm": "3.31.4",
+    "@tiptap/starter-kit": "3.31.4",
+    "@tiptap/extension-table": "3.31.4",
+    "@tiptap/extension-highlight": "3.31.4",
+    "@tiptap/extensions": "3.31.4",
+    "esbuild": "0.28.2"
+  }
+}
