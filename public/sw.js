@@ -4,7 +4,7 @@
 //
 // VERSION must change with every release (keep it equal to appVersion in
 // config.js): a changed file is how phones notice there's a new version.
-const VERSION = '1.14.0';
+const VERSION = '1.14.1';
 const CACHE = 'koinos-shell-' + VERSION;
 const SHELL = [
   '/', '/index.html', '/styles.css', '/app.js', '/config.js',
