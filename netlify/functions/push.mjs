@@ -52,11 +52,12 @@ export default async (req) => {
     }
 
     const items = await claimNew(db);
-    if (!items.bulletins.length && !items.posts.length && !items.replies.length) return json(200, { sent: 0 });
+    const total = items.bulletins.length + items.posts.length + items.replies.length + items.activations.length + items.standDowns.length;
+    if (!total) return json(200, { sent: 0 });
     const ctx = await loadContext(db, items);
     const deliveries = planDeliveries(items, ctx);
     const res = await sendAll(db, deliveries);
-    return json(200, { items: items.bulletins.length + items.posts.length + items.replies.length, ...res });
+    return json(200, { items: total, ...res });
   } catch (e) {
     console.error('push failed', e);
     return json(500, { error: 'Push failed' });
@@ -100,20 +101,30 @@ export async function claimNew(db, now = new Date()) {
     db.patch(`posts?notified_at=is.null&resolved_at=is.null&last_activity_at=gte.${encodeURIComponent(since)}&select=id,kind,body,author_id,shift_id,photo_path`, stamp),
     db.patch(`post_replies?notified_at=is.null&created_at=gte.${encodeURIComponent(since)}&select=id,post_id,body,author_id,photo_path`, stamp)
   ]);
-  return { bulletins: bulletins || [], posts: posts || [], replies: replies || [] };
+  // Team activations (and their "stand down"). Optional until the database is updated.
+  let activations = [], standDowns = [];
+  try {
+    [activations, standDowns] = await Promise.all([
+      db.patch(`team_activations?notified_at=is.null&ended_at=is.null&created_at=gte.${encodeURIComponent(since)}&select=*`, stamp),
+      db.patch(`team_activations?end_notified_at=is.null&ended_at=not.is.null&ended_at=gte.${encodeURIComponent(since)}&select=*`, { end_notified_at: now.toISOString() })
+    ]);
+  } catch { /* table not there yet */ }
+  return { bulletins: bulletins || [], posts: posts || [], replies: replies || [], activations: activations || [], standDowns: standDowns || [] };
 }
 
 async function loadContext(db, items) {
   const threadIds = [...new Set(items.replies.map((r) => r.post_id))];
   const inList = (ids) => `(${ids.map((x) => `"${x}"`).join(',')})`;
-  const [profiles, subs, roster, threads, threadReplies] = await Promise.all([
+  const teamsNeeded = items.activations && items.activations.length;
+  const [profiles, subs, roster, threads, threadReplies, teams] = await Promise.all([
     db.get('profiles?select=id,full_name,role,notify_posts,notify_replies,notify_cover'),
     db.get('push_subscriptions?select=*'),
-    db.get('roster?select=name,profile_id&profile_id=not.is.null'),
+    db.get(teamsNeeded ? 'roster?select=name,profile_id,team_id&profile_id=not.is.null&active=is.true' : 'roster?select=name,profile_id&profile_id=not.is.null'),
     threadIds.length ? db.get(`posts?id=in.${inList(threadIds)}&select=id,author_id,kind`) : [],
-    threadIds.length ? db.get(`post_replies?post_id=in.${inList(threadIds)}&select=post_id,author_id`) : []
+    threadIds.length ? db.get(`post_replies?post_id=in.${inList(threadIds)}&select=post_id,author_id`) : [],
+    teamsNeeded ? db.get('teams?select=id,name,rally_point,sort_order&order=sort_order') : []
   ]);
-  return { profiles, subs, roster, threads, threadReplies };
+  return { profiles, subs, roster, threads, threadReplies, teams };
 }
 
 // ----------------------------------------------------------------------
@@ -135,6 +146,20 @@ export function planDeliveries(items, ctx) {
   const out = [];
   const toPeople = (ids, msg) => { for (const id of ids) for (const sub of subsBy.get(id) || []) out.push({ sub, msg }); };
   const everyone = (except, pref) => [...members.values()].filter((p) => p.id !== except && (!pref || p[pref] !== false)).map((p) => p.id);
+
+  // Full team activation: everyone, whatever their notification settings,
+  // sent to their own team's Rally Point.
+  for (const a of items.activations || []) {
+    const drill = a.drill ? 'DRILL – ' : '';
+    for (const m of members.values()) {
+      const msg = activationMessage(a, m.id, ctx);
+      toPeople([m.id], { title: `${drill}🚨 SECURITY TEAM ACTIVATED`, body: msg, url: '#/activation', tag: 'activation-' + a.id, urgent: true,
+        extra: { requireInteraction: true, urgent: true } });
+    }
+  }
+  for (const a of items.standDowns || []) {
+    toPeople(everyone(a.ended_by), { title: (a.drill ? 'DRILL – ' : '') + 'Stand down', body: 'The security team activation has ended. Thank you.', url: '#/activation', tag: 'activation-' + a.id });
+  }
 
   for (const b of items.bulletins) {
     const label = b.kind === 'bolo' ? 'BOLO' : 'Bulletin';
@@ -161,6 +186,20 @@ export function planDeliveries(items, ctx) {
     toPeople(ids, { title: `${nameOf(r.author_id)} replied`, body: clip(r.body) || (r.photo_path ? 'Shared a photo' : ''), url: '#/board/' + r.post_id, tag: 'post-' + r.post_id });
   }
   return out;
+}
+
+// "Security Team is being ACTIVATED, please quickly move to {Rally Point}…"
+// People not on a team are sent to the first team's (Alpha's) Rally Point.
+export function activationMessage(a, profileId, ctx) {
+  const teams = (ctx.teams || []).slice().sort((x, y) => x.sort_order - y.sort_order);
+  const r = ctx.roster.find((x) => x.profile_id === profileId);
+  const team = r && teams.find((t) => t.id === r.team_id);
+  const where = team && team.rally_point ? `${team.rally_point} (${team.name} Team)`
+    : team ? `your ${team.name} Team rally point`
+      : teams[0] && teams[0].rally_point ? `${teams[0].rally_point} (${teams[0].name} Team)` : 'your team\'s rally point';
+  let body = `Security Team is being ACTIVATED, please quickly move to ${where} to coordinate with the rest of the Security team.`;
+  if (a.message) body += ` ${clip(a.message, 200)}`;
+  return body;
 }
 
 // ----------------------------------------------------------------------

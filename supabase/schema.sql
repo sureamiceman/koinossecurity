@@ -1990,6 +1990,147 @@ grant execute on function public.attendance_save(date, int, jsonb, text, boolean
 grant execute on function public.attendance_resend(uuid) to authenticated;
 
 -- ---------------------------------------------------------------------
+-- Teams within the security team (Alpha, Bravo, Charlie, Delta). Each has
+-- one Team Lead, a Rally Point where it gathers when the security team is
+-- activated, and its emergency procedure (an SOP, usually in the
+-- Emergency tab). Each roster entry belongs to at most one team.
+-- ---------------------------------------------------------------------
+create table if not exists public.teams (
+  id              uuid primary key default gen_random_uuid(),
+  name            text not null unique,
+  color           text not null default 'gray'
+                  check (color in ('red','orange','yellow','green','teal','blue','purple','pink','gray')),
+  sort_order      int  not null default 0,
+  lead_roster_id  uuid references public.roster(id) on delete set null,
+  rally_point     text not null default '',
+  sop_id          uuid references public.sops(id) on delete set null,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+alter table public.roster add column if not exists team_id uuid references public.teams(id) on delete set null;
+create index if not exists roster_team_idx on public.roster(team_id);
+
+alter table public.teams enable row level security;
+drop policy if exists teams_select on public.teams;
+drop policy if exists teams_insert on public.teams;
+drop policy if exists teams_update on public.teams;
+drop policy if exists teams_delete on public.teams;
+create policy teams_select on public.teams for select to authenticated using (public.is_member());
+create policy teams_insert on public.teams for insert to authenticated with check (public.is_admin());
+create policy teams_update on public.teams for update to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy teams_delete on public.teams for delete to authenticated using (public.is_admin());
+revoke all on public.teams from anon, authenticated;
+grant select, insert, update, delete on public.teams to authenticated;
+
+-- Keep leads and members consistent: a lead is always on their own team,
+-- and someone who leaves a team (or the roster) stops being its lead.
+create or replace function public.teams_lead_joins() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  new.updated_at := now();
+  if new.lead_roster_id is not null then
+    update public.roster set team_id = new.id where id = new.lead_roster_id and team_id is distinct from new.id;
+    update public.teams set lead_roster_id = null where lead_roster_id = new.lead_roster_id and id <> new.id;
+  end if;
+  return new;
+end $$;
+drop trigger if exists teams_lead_joins on public.teams;
+create trigger teams_lead_joins before insert or update on public.teams
+  for each row execute function public.teams_lead_joins();
+
+create or replace function public.roster_team_left() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if old.team_id is not null and (new.team_id is distinct from old.team_id or not new.active) then
+    update public.teams set lead_roster_id = null where id = old.team_id and lead_roster_id = new.id;
+  end if;
+  return null;
+end $$;
+drop trigger if exists roster_team_left on public.roster;
+create trigger roster_team_left after update on public.roster
+  for each row execute function public.roster_team_left();
+
+-- First run: the four teams, a starting Rally Point, and a starting
+-- emergency procedure for each (an SOP in the Emergency tab). All of it
+-- can be changed in the app (Team → Manage teams, and the SOP editor).
+do $$
+declare
+  t record;
+  sid uuid;
+begin
+  if exists (select 1 from public.teams) then return; end if;
+  insert into public.sop_categories (name, color, sort_order) values ('Emergency', 'red', 0) on conflict (name) do nothing;
+  for t in select * from (values
+    (0, 'Alpha', 'red', 'Front entrance',
+     '<p><strong>Alpha is the coordinating team.</strong> In a full team activation, Alpha''s Team Lead directs the other teams.</p><ol><li><p>Secure the <strong>front entrance</strong>.</p></li><li><p>Call <strong>911</strong> and stay the point of contact with police and EMS when they arrive.</p></li><li><p>Coordinate the internal teams: confirm Bravo, Charlie and Delta are in position.</p></li><li><p>Direct <strong>Delta</strong> to backfill any gaps.</p></li></ol><p><mark>Starting draft: edit with your team''s actual procedure.</mark></p>'),
+    (1, 'Bravo', 'blue', 'Mid Hallway',
+     '<ol><li><p>Lock down the <strong>Nursery</strong> and <strong>Preschool</strong> rooms.</p></li><li><p>Secure the <strong>Mid Hallway</strong>.</p></li><li><p>Report to Alpha when your area is secure, and stay in position until Alpha gives the all-clear.</p></li></ol><p><mark>Starting draft: edit with your team''s actual procedure.</mark></p>'),
+    (2, 'Charlie', 'green', 'Back Hallway (KidZone)',
+     '<ol><li><p>Secure the <strong>Back Hallway</strong>.</p></li><li><p>Lock down the <strong>KidZone</strong> rooms.</p></li><li><p>Report to Alpha when your area is secure, and stay in position until Alpha gives the all-clear.</p></li></ol><p><mark>Starting draft: edit with your team''s actual procedure.</mark></p>'),
+    (3, 'Delta', 'purple', 'Sanctuary',
+     '<ol><li><p>Stay in the <strong>Sanctuary</strong>.</p></li><li><p>Coordinate communications for the team.</p></li><li><p>Backfill any gaps in the other teams as <strong>Alpha</strong> directs.</p></li></ol><p><mark>Starting draft: edit with your team''s actual procedure.</mark></p>')
+  ) as v(ord, nm, col, rally, body) loop
+    select id into sid from public.sops where title = t.nm || ' Team – Emergency procedure';
+    if sid is null then
+      insert into public.sops (title, category, body, format, sort_order)
+      values (t.nm || ' Team – Emergency procedure', 'Emergency', t.body, 'html', t.ord)
+      returning id into sid;
+    end if;
+    insert into public.teams (name, color, sort_order, rally_point, sop_id) values (t.nm, t.col, t.ord, t.rally, sid);
+  end loop;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- Full team activation. An admin activates; everyone gets an urgent
+-- notification sending them to their team's Rally Point (see
+-- netlify/functions/push.mjs), and the app shows a red banner until an
+-- admin ends it ("Stand down"). One activation at a time.
+-- ---------------------------------------------------------------------
+create table if not exists public.team_activations (
+  id               uuid primary key default gen_random_uuid(),
+  created_at       timestamptz not null default now(),
+  created_by       uuid references public.profiles(id) on delete set null,
+  message          text not null default '',
+  drill            boolean not null default false,
+  ended_at         timestamptz,
+  ended_by         uuid references public.profiles(id) on delete set null,
+  notified_at      timestamptz,   -- push sent
+  end_notified_at  timestamptz    -- "stand down" push sent
+);
+create unique index if not exists team_activations_one_active on public.team_activations ((true)) where ended_at is null;
+create index if not exists team_activations_created_idx on public.team_activations(created_at desc);
+alter table public.team_activations enable row level security;
+drop policy if exists team_activations_select on public.team_activations;
+create policy team_activations_select on public.team_activations for select to authenticated using (public.is_member());
+revoke all on public.team_activations from anon, authenticated;
+grant select on public.team_activations to authenticated;
+
+create or replace function public.activate_team(p_message text, p_drill boolean) returns public.team_activations
+language plpgsql security definer set search_path = public as $$
+declare a public.team_activations;
+begin
+  if not public.is_admin() then raise exception 'Only admins can activate the team.'; end if;
+  select * into a from public.team_activations where ended_at is null;
+  if found then raise exception 'The team is already activated. End that activation first.'; end if;
+  insert into public.team_activations (created_by, message, drill)
+  values (auth.uid(), left(trim(coalesce(p_message, '')), 500), coalesce(p_drill, false))
+  returning * into a;
+  return a;
+end $$;
+
+create or replace function public.end_activation(p_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_admin() then raise exception 'Only admins can end an activation.'; end if;
+  update public.team_activations set ended_at = now(), ended_by = auth.uid() where id = p_id and ended_at is null;
+end $$;
+
+revoke all on function public.activate_team(text, boolean) from public, anon;
+revoke all on function public.end_activation(uuid) from public, anon;
+grant execute on function public.activate_team(text, boolean) to authenticated;
+grant execute on function public.end_activation(uuid) to authenticated;
+
+-- ---------------------------------------------------------------------
 -- Photo storage (private bucket; members view, admins upload)
 -- ---------------------------------------------------------------------
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
@@ -2046,7 +2187,7 @@ create policy "photos_self_delete" on storage.objects for delete to authenticate
 do $$
 declare t text;
 begin
-  foreach t in array array['bulletins','events','shifts','posts','post_replies','attendance_counts'] loop
+  foreach t in array array['bulletins','events','shifts','posts','post_replies','attendance_counts','team_activations','teams'] loop
     if not exists (
       select 1 from pg_publication_tables
       where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t
