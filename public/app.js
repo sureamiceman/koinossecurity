@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [] });
   const state = {
     session: null,
     profile: null,
@@ -27,7 +27,7 @@
     showArchived: false,
     sopQuery: '',
     sopTab: null,
-    teamFilter: 'all',
+    teamFilter: null,
     channel: null,
     installPrompt: null,
     lastSeenAlerts: 0,
@@ -410,10 +410,12 @@
     attendance_sections: (t) => t.select('*').order('sort_order'),
     attendance_fields: (t) => t.select('*').order('sort_order'),
     attendance_counts: (t) => t.select('*').gte('service_date', attSince()).order('service_date', { ascending: false }),
-    attendance_values: (t) => t.select('*, attendance_counts!inner(service_date)').gte('attendance_counts.service_date', attSince())
+    attendance_values: (t) => t.select('*, attendance_counts!inner(service_date)').gte('attendance_counts.service_date', attSince()),
+    teams: (t) => t.select('*').order('sort_order'),
+    team_activations: (t) => t.select('*').order('created_at', { ascending: false }).limit(10)
   };
   const attSince = () => isoDay(new Date(Date.now() - 200 * 864e5));
-  const OPTIONAL_TABLES = new Set(['sop_categories', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
+  const OPTIONAL_TABLES = new Set(['sop_categories', 'teams', 'team_activations', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
 
   function loadCachedData() {
     for (const t of Object.keys(QUERIES)) {
@@ -493,6 +495,16 @@
         clearTimeout(state.boardTimer);
         state.boardTimer = setTimeout(async () => { await Promise.all([refreshTable('posts'), refreshTable('post_replies')]); await resolvePhotos(); render(); }, 400);
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'team_activations' }, async (payload) => {
+        await refreshTable('team_activations');
+        render();
+        const n = payload.new || {};
+        if (payload.eventType === 'INSERT') {
+          toast((n.drill ? 'DRILL: ' : '') + 'SECURITY TEAM ACTIVATED. Go to: ' + myRally().where, 8000);
+          if (navigator.vibrate) navigator.vibrate([400, 150, 400, 150, 400]);
+        } else if (n.ended_at && !(payload.old || {}).ended_at) toast((n.drill ? 'Drill over: ' : '') + 'Stand down. The activation has ended.', 6000);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'teams' }, async () => { await refreshTable('teams'); render(); })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance_counts' }, () => {
         clearTimeout(state.attTimer);
         state.attTimer = setTimeout(async () => { await Promise.all([refreshTable('attendance_counts'), refreshTable('attendance_values')]); render(); }, 400);
@@ -579,7 +591,7 @@
   // Generic form dialog. Field types: text (default), textarea, select, checkbox,
   // number, date, time, tel, email, password, photo, weekdays, posts.
   // A field may have visible(values) to show/hide it as other fields change.
-  function openForm({ title, fields, values = {}, submitLabel = 'Save', cancelLabel = 'Cancel', onSubmit, onDelete, deleteLabel = 'Delete', deleteConfirm, intro, wide }) {
+  function openForm({ title, fields, values = {}, submitLabel = 'Save', cancelLabel = 'Cancel', onSubmit, onDelete, deleteLabel = 'Delete', deleteConfirm, intro, wide, submitClass }) {
     const dlg = h('dialog', { class: wide ? 'wide' : null });
     const cleanups = [];
     const getters = {};
@@ -674,7 +686,7 @@
 
     const err = h('div', { class: 'error-text hidden' });
     body.append(err);
-    const saveBtn = h('button', { type: 'submit', class: 'btn primary' }, submitLabel);
+    const saveBtn = h('button', { type: 'submit', class: 'btn ' + (submitClass || 'primary') }, submitLabel);
     const showErr = (m) => { err.textContent = m; err.classList.remove('hidden'); err.scrollIntoView({ block: 'nearest' }); };
 
     const foot = h('div', { class: 'dlg-foot' },
@@ -1006,9 +1018,10 @@
     let [tab, id, sub] = route();
     if ((tab === 'users' || tab === 'assignments') && !isAdmin()) tab = 'more';
     if (tab === 'attendance-setup' && !isAdmin()) tab = 'attendance';
-    const views = { alerts: alertsView, schedule: scheduleView, confirm: confirmView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView };
+    if (tab === 'teams' && !isAdmin()) tab = 'team';
+    const views = { alerts: alertsView, schedule: scheduleView, confirm: confirmView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView, teams: teamsAdminView, activation: activationView };
     const v = (views[tab] || alertsView)(id, sub);
-    const activeTab = tab === 'users' ? 'more' : (tab === 'assignments' || tab === 'confirm') ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : (views[tab] ? tab : 'alerts');
+    const activeTab = tab === 'users' ? 'more' : (tab === 'assignments' || tab === 'confirm') ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : tab === 'teams' ? 'team' : tab === 'activation' ? 'alerts' : (views[tab] ? tab : 'alerts');
 
     if (activeTab === 'alerts') {
       state.lastSeenAlerts = Date.now();
@@ -1023,6 +1036,7 @@
         h('h1', {}, v.title),
         v.action || null),
       navigator.onLine ? null : h('div', { class: 'offline-bar' }, 'Offline — showing saved information'),
+      activationBar(),
       updateBar(),
       h('main', {}, v.content),
       h('nav', { class: 'tabbar', 'aria-label': 'Main' }, TABS.map(([key, label, ic]) => {
@@ -1051,6 +1065,11 @@
     if (!showing.length) content.push(empty(state.showArchived ? 'No past bulletins' : 'No active bulletins right now', 'bell'));
     for (const b of showing) content.push(bulletinCard(b));
 
+    if (teamsOn() && !activeActivation()) {
+      content.unshift(isAdmin()
+        ? h('div', { class: 'actions activation-entry' }, h('button', { class: 'btn activate-btn', onclick: activateTeam }, '🚨 Activate Security Team'), h('a', { class: 'btn small', href: '#/activation' }, 'Teams & rally points'))
+        : h('a', { class: 'list-item card-link', href: '#/activation' }, h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Emergency activation'), h('div', { class: 'sub' }, 'Your team, Rally Point and procedure')), icon('chev')));
+    }
     return { title: 'Alerts', action: isAdmin() ? topAction('+ New', () => editBulletin()) : null, content };
   }
 
@@ -1473,9 +1492,12 @@
     const medical = all.filter((p) => p.is_medical);
     const ccw = all.filter((p) => p.ccw_qualified)
       .sort((a, b) => (a.ccw_expires_on || '0000') < (b.ccw_expires_on || '0000') ? -1 : 1);
+    if (!state.teamFilter) state.teamFilter = teamsOn() ? 'teams' : 'all';
+    if (state.teamFilter === 'teams' && !teamsOn()) state.teamFilter = 'all';
     const showing = state.teamFilter === 'medical' ? medical : state.teamFilter === 'ccw' ? ccw : all;
     const chip = (key, label) => h('button', { class: 'chip' + (state.teamFilter === key ? ' on' : ''), onclick: () => { state.teamFilter = key; render(); } }, label);
     const content = [h('div', { class: 'chips' },
+      teamsOn() ? chip('teams', 'By team') : null,
       chip('all', `Everyone (${all.length})`), chip('medical', `Medical (${medical.length})`), chip('ccw', `CCW (${ccw.length})`))];
 
     const problems = ccw.filter((p) => p.active && ccwStatus(p).problem);
@@ -1484,7 +1506,10 @@
         `${problems.length} CCW qualification${problems.length > 1 ? 's' : ''} expired, expiring within ${CCW_WARN_DAYS} days, or missing a date: `,
         problems.map((p) => p.name).join(', ')));
     }
-    if (!showing.length) content.push(empty(
+    if (state.teamFilter === 'teams') {
+      if (isAdmin()) content.push(h('div', { class: 'actions team-tools' }, h('a', { class: 'btn small', href: '#/teams' }, 'Manage teams'), h('a', { class: 'btn small', href: '#/activation' }, 'Team activation')));
+      content.push(...teamSections(all));
+    } else if (!showing.length) content.push(empty(
       state.teamFilter === 'medical' ? 'No medical points of contact listed'
         : state.teamFilter === 'ccw' ? 'No CCW-qualified team members listed' : 'No team members listed yet', 'users'));
     else content.push(h('div', { class: 'roster-grid' }, showing.map(personCard)));
@@ -1504,6 +1529,8 @@
         h('div', { class: 'name' }, p.name),
         p.position ? h('div', { class: 'pos' }, p.position) : null,
         h('div', { class: 'badges' },
+          state.teamFilter !== 'teams' ? teamChip(teamOfPerson(p)) : null,
+          isLead(p) ? leadBadge() : null,
           p.is_medical ? h('span', { class: 'badge medical' }, 'Medical') : null,
           c ? h('span', { class: 'badge ' + c.cls }, c.label) : null,
           !p.active ? h('span', { class: 'badge muted-badge' }, 'Inactive') : null)));
@@ -1517,6 +1544,8 @@
       body: [
         url ? h('img', { class: 'profile-photo', src: url, alt: p.name, onclick: () => viewPhoto(url) }) : null,
         p.position ? h('div', { class: 'muted' }, p.position) : null,
+        teamOfPerson(p) ? h('div', { class: 'card' }, teamChip(teamOfPerson(p), ' Team'), isLead(p) ? [' ', leadBadge()] : null,
+          h('div', { class: 'meta' }, 'Rally Point: ' + (teamOfPerson(p).rally_point || 'not set'))) : null,
         p.is_medical ? h('div', { class: 'card' },
           h('span', { class: 'badge medical' }, 'Medical point of contact'),
           p.medical_notes ? h('div', { class: 'body-text' }, p.medical_notes) : null) : null,
@@ -1540,10 +1569,11 @@
     const accounts = state.data.profiles.filter((a) => a.role !== 'pending');
     openForm({
       title: isNew ? 'Add team member' : 'Edit team member',
-      values: { ...p, profile_id: p.profile_id || '', ccw_expires_on: p.ccw_expires_on || '' },
+      values: { ...p, profile_id: p.profile_id || '', ccw_expires_on: p.ccw_expires_on || '', team_id: p.team_id || '' },
       fields: [
         { name: 'name', label: 'Name', required: true },
         { name: 'position', label: 'Position / usual post', placeholder: 'e.g. Team lead, Parking lot, Sanctuary' },
+        ...(teamsOn() ? [{ name: 'team_id', label: 'Team', type: 'select', options: [['', 'No team'], ...teamsSorted().map((t) => [t.id, `${t.name} Team`])] }] : []),
         { name: 'phone', label: 'Phone', type: 'tel', inputmode: 'tel' },
         { name: 'email', label: 'Email', type: 'email', inputmode: 'email' },
         { name: 'profile_id', label: 'App account', type: 'select',
@@ -1566,6 +1596,7 @@
         if (v.ccw_qualified && !v.ccw_expires_on && !confirm('CCW is checked but there is no expiry date. Save anyway?')) throw new Error('Add the CCW expiry date, then save.');
         const ph = await applyPhoto('roster', p.photo_path, photo);
         const row = { ...v, profile_id: v.profile_id || null, ccw_expires_on: v.ccw_expires_on || null, photo_path: ph.path };
+        if ('team_id' in v) row.team_id = v.team_id || null;
         try {
           await saveRow('roster', p.id, row);
         } catch (e) {
@@ -1577,6 +1608,7 @@
         if (row.profile_id && row.profile_id !== p.profile_id) notifyServer(); // welcome post
         await afterSave('roster', isNew ? 'Team member added' : 'Saved');
         refreshTable('posts');
+        if (teamsOn()) { await refreshTable('teams'); render(); }
       },
       onDelete: isNew ? null : async () => {
         await deleteRow('roster', p.id);
@@ -1585,6 +1617,234 @@
       },
       deleteConfirm: 'Remove this person from the roster permanently? Their scheduled posts become open. (Unchecking "Active" hides them instead.)'
     });
+  }
+
+  // ------------------------------------------------------------------
+  // Teams (Alpha, Bravo, Charlie, Delta…): members, one Team Lead, a Rally
+  // Point and the team's emergency procedure (an SOP).
+  //   #/teams        admins: edit teams, assign people
+  //   #/activation   full team activation (admins start/end it)
+  // ------------------------------------------------------------------
+  const teamsOn = () => state.data.teams.length > 0;
+  const teamsSorted = () => state.data.teams.slice().sort((a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
+  const teamById = (id) => id && state.data.teams.find((t) => t.id === id);
+  const teamOfPerson = (r) => r && teamById(r.team_id);
+  const rosterById = (id) => id && state.data.roster.find((r) => r.id === id);
+  const leadOf = (t) => t && rosterById(t.lead_roster_id);
+  const isLead = (r) => !!(r && state.data.teams.some((t) => t.lead_roster_id === r.id));
+  const sopById = (id) => id && state.data.sops.find((s) => s.id === id);
+  const myTeam = () => teamOfPerson(myRoster());
+  const teamChip = (t, extra) => t ? h('span', { class: `badge team-badge tc-${t.color}` }, t.name + (extra || '')) : null;
+  const leadBadge = () => h('span', { class: 'badge lead-badge', title: 'Team Lead' }, '★ Lead');
+  const callLink = (r, label) => r && r.phone ? h('a', { class: 'call-btn small-call', href: telHref(r.phone) }, icon('phone'), label || 'Call') : null;
+
+  // A team's details: lead, rally point, procedure. Used on the Team tab, More and the activation screen.
+  function teamDetails(t, { showMembers = false } = {}) {
+    const lead = leadOf(t);
+    const sop = sopById(t.sop_id);
+    const members = state.data.roster.filter((r) => r.team_id === t.id && r.active);
+    return h('div', { class: 'team-details' },
+      h('div', { class: 'td-line' }, h('span', { class: 'td-label' }, 'Team Lead'),
+        lead ? h('span', { class: 'td-value' }, lead.name, callLink(lead)) : h('span', { class: 'td-value muted' }, 'Not set')),
+      h('div', { class: 'td-line' }, h('span', { class: 'td-label' }, 'Rally Point'),
+        h('span', { class: 'td-value' + (t.rally_point ? '' : ' muted') }, t.rally_point || 'Not set')),
+      h('div', { class: 'td-line' }, h('span', { class: 'td-label' }, 'Procedure'),
+        sop ? h('a', { class: 'td-value', href: '#/sops/' + encodeURIComponent(sop.id) }, sop.title) : h('span', { class: 'td-value muted' }, 'Not set')),
+      showMembers ? h('div', { class: 'td-line' }, h('span', { class: 'td-label' }, 'Members'), h('span', { class: 'td-value' }, members.length ? members.map((r) => r.name).join(', ') : 'Nobody yet')) : null);
+  }
+
+  // Team tab, "By team": one section per team, lead first.
+  function teamSections(all) {
+    const out = [];
+    const groups = teamsSorted().map((t) => ({ t, people: all.filter((r) => r.team_id === t.id) }));
+    const none = all.filter((r) => !teamById(r.team_id));
+    for (const { t, people } of groups) {
+      people.sort((a, b) => (b.id === t.lead_roster_id) - (a.id === t.lead_roster_id) || (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
+      out.push(h('section', { class: `team-section tc-${t.color}` },
+        h('div', { class: 'team-head' },
+          h('h2', {}, `${t.name} Team`),
+          h('span', { class: 'muted small' }, people.length === 1 ? '1 person' : `${people.length} people`),
+          isAdmin() ? h('button', { class: 'btn small', onclick: () => editTeam(t) }, 'Edit') : null),
+        teamDetails(t),
+        people.length ? h('div', { class: 'roster-grid' }, people.map(personCard)) : h('div', { class: 'muted small team-empty' }, isAdmin() ? 'Nobody on this team yet. Use Assign people below, or Edit a person.' : 'Nobody on this team yet.')));
+    }
+    if (none.length) {
+      out.push(h('section', { class: 'team-section tc-gray' },
+        h('div', { class: 'team-head' }, h('h2', {}, 'Not on a team'), h('span', { class: 'muted small' }, `${none.length}`)),
+        h('div', { class: 'roster-grid' }, none.map(personCard))));
+    }
+    return out;
+  }
+
+  // Admins: #/teams
+  function teamsAdminView() {
+    const content = [];
+    content.push(h('p', { class: 'muted small' }, 'Each team has one Team Lead, a Rally Point where it gathers when the security team is activated, and its emergency procedure (an SOP, usually in the Emergency tab).'));
+    for (const t of teamsSorted()) {
+      content.push(h('div', { class: `card team-admin tc-${t.color}` },
+        h('div', { class: 'row' }, h('h3', { class: 'grow' }, `${t.name} Team`), h('button', { class: 'btn small', onclick: () => editTeam(t) }, 'Edit')),
+        teamDetails(t, { showMembers: true })));
+    }
+    content.push(h('div', { class: 'actions' }, h('button', { class: 'btn small', onclick: () => editTeam() }, '+ Add team')));
+
+    content.push(h('div', { class: 'section-title' }, 'Assign people'));
+    const people = state.data.roster.filter((r) => r.active).sort((a, b) => a.name.localeCompare(b.name));
+    content.push(h('div', { class: 'list' }, people.map((r) => {
+      const sel = h('select', { class: 'small-select', 'aria-label': `Team for ${r.name}` },
+        h('option', { value: '' }, 'No team'), teamsSorted().map((t) => h('option', { value: t.id }, `${t.name}`)));
+      sel.value = r.team_id || '';
+      sel.addEventListener('change', async () => {
+        const was = teamOfPerson(r);
+        if (was && was.lead_roster_id === r.id && !confirm(`${r.name} is the ${was.name} Team Lead. Moving them means ${was.name} has no lead until you pick one. Continue?`)) { sel.value = r.team_id || ''; return; }
+        sel.disabled = true;
+        try {
+          await saveRow('roster', r.id, { team_id: sel.value || null });
+          await Promise.all([refreshTable('roster'), refreshTable('teams')]);
+          render();
+          toast(sel.value ? `${r.name} → ${teamById(sel.value).name}` : `${r.name}: no team`);
+        } catch (e) { toast(friendlyError(e)); sel.disabled = false; }
+      });
+      return h('div', { class: 'list-item assign-row' },
+        h('div', { class: 'grow' }, h('div', { class: 'title' }, r.name, isLead(r) ? [' ', leadBadge()] : null), r.position ? h('div', { class: 'sub' }, r.position) : null),
+        sel);
+    })));
+    return { title: 'Manage teams', back: '#/team', content };
+  }
+
+  function editTeam(t) {
+    const isNew = !t;
+    t = t || {};
+    const people = state.data.roster.filter((r) => r.active).sort((a, b) => (a.team_id === t.id ? -1 : 0) - (b.team_id === t.id ? -1 : 0) || a.name.localeCompare(b.name));
+    const sops = state.data.sops.slice().sort((a, b) => (a.category === 'Emergency' ? -1 : 0) - (b.category === 'Emergency' ? -1 : 0) || a.title.localeCompare(b.title));
+    openForm({
+      title: isNew ? 'Add team' : `Edit ${t.name} Team`,
+      values: { name: t.name, color: t.color || 'gray', lead_roster_id: t.lead_roster_id || '', rally_point: t.rally_point, sop_id: t.sop_id || '', sort_order: t.sort_order != null ? t.sort_order : state.data.teams.length },
+      fields: [
+        { name: 'name', label: 'Team name', required: true, placeholder: 'e.g. Alpha' },
+        { name: 'color', label: 'Color', type: 'select', options: SOP_COLORS },
+        { name: 'lead_roster_id', label: 'Team Lead', type: 'select',
+          options: [['', 'Not set'], ...people.map((r) => { const ot = teamOfPerson(r); return [r.id, r.name + (ot && ot.id !== t.id ? ` (now on ${ot.name})` : '')]; })],
+          hint: 'The lead is put on this team automatically. A person can lead only one team.' },
+        { name: 'rally_point', label: 'Rally Point', placeholder: 'e.g. Front entrance, by the welcome desk', hint: 'Where this team gathers when the security team is activated. It is in the activation notification.' },
+        { name: 'sop_id', label: 'Emergency procedure', type: 'select', options: [['', 'Not set'], ...sops.map((s) => [s.id, `${s.title}${s.category ? ' · ' + s.category : ''}`])],
+          hint: 'An SOP. Write or change it in the SOPs tab (Emergency).' },
+        { name: 'sort_order', label: 'Order', type: 'number', inputmode: 'numeric', hint: 'Lower numbers come first. The first team is the coordinating team: people not on a team are sent to its Rally Point.' }
+      ],
+      onSubmit: async (v) => {
+        const row = { name: v.name, color: v.color, lead_roster_id: v.lead_roster_id || null, rally_point: v.rally_point, sop_id: v.sop_id || null, sort_order: v.sort_order };
+        try { await saveRow('teams', t.id, row); } catch (e) {
+          if (/teams_name_key|duplicate key/i.test(e.message || '')) throw new Error('There is already a team with that name.');
+          throw e;
+        }
+        await Promise.all([refreshTable('teams'), refreshTable('roster')]);
+        render();
+        toast(isNew ? 'Team added' : 'Team saved');
+      },
+      onDelete: isNew ? null : async () => {
+        await deleteRow('teams', t.id);
+        await Promise.all([refreshTable('teams'), refreshTable('roster')]);
+        render();
+        toast('Team removed');
+      },
+      deleteConfirm: `Remove the ${t.name || ''} Team? Its members stay on the roster with no team.`
+    });
+  }
+
+  // More: "Your team"
+  function myTeamCard() {
+    if (!teamsOn() || !myRoster()) return null;
+    const t = myTeam();
+    if (!t) return h('div', { class: 'card' }, h('p', { class: 'body-text' }, "You're not on a team yet. An admin can add you under Team → Manage teams."));
+    const me = myRoster();
+    return h('div', { class: `card my-team tc-${t.color}` },
+      h('div', { class: 'row' }, h('div', { class: 'grow' }, h('div', { class: 'muted small' }, "You're on"), h('h3', {}, `${t.name} Team`)),
+        t.lead_roster_id === me.id ? leadBadge() : null),
+      teamDetails(t));
+  }
+
+  // ---- Full team activation ----
+  const activeActivation = () => state.data.team_activations.find((a) => !a.ended_at);
+  function myRally() {
+    const t = myTeam();
+    const first = teamsSorted()[0];
+    if (t) return { team: t, where: t.rally_point || `your ${t.name} Team rally point` };
+    return { team: first || null, where: first && first.rally_point ? `${first.rally_point} (${first.name} Team)` : "your team's rally point", unassigned: true };
+  }
+
+  function activationBar() {
+    const a = activeActivation();
+    if (!a) return null;
+    const r = myRally();
+    return h('a', { class: 'activation-bar', href: '#/activation' },
+      h('div', { class: 'ab-title' }, (a.drill ? 'DRILL · ' : '') + '🚨 SECURITY TEAM ACTIVATED'),
+      h('div', { class: 'ab-where' }, 'Go to: ', h('strong', {}, r.where)),
+      h('div', { class: 'ab-more' }, 'Tap for your team, lead and procedure'));
+  }
+
+  function activationView() {
+    const a = activeActivation();
+    const content = [];
+    if (!a) {
+      const last = state.data.team_activations.slice().sort((x, y) => new Date(y.created_at) - new Date(x.created_at))[0];
+      content.push(h('div', { class: 'card' },
+        h('h3', {}, 'No activation in progress'),
+        h('p', { class: 'body-text' }, 'When an admin activates the security team, everyone gets an urgent notification telling them to go to their team\'s Rally Point, and this screen shows each team\'s lead and procedure.'),
+        last ? h('div', { class: 'meta' }, `Last ${last.drill ? 'drill' : 'activation'}: ${fmtDateTime(last.created_at)} by ${nameOf(last.created_by) || 'an admin'}, ended ${last.ended_at ? fmtDateTime(last.ended_at) : ''}`) : null,
+        isAdmin() ? h('div', { class: 'actions' }, h('button', { class: 'btn activate-btn block', onclick: activateTeam }, '🚨 Activate Security Team')) : null));
+    } else {
+      const r = myRally();
+      content.push(h('div', { class: 'card activation-card' },
+        h('div', { class: 'ac-title' }, (a.drill ? 'DRILL · ' : '') + 'SECURITY TEAM ACTIVATED'),
+        h('div', { class: 'meta' }, `${fmtDateTime(a.created_at)} by ${nameOf(a.created_by) || 'an admin'}`),
+        a.message ? h('p', { class: 'ac-message' }, a.message) : null,
+        h('div', { class: 'ac-go' }, 'Go to ', h('strong', {}, r.where), r.unassigned ? h('div', { class: 'small' }, "You're not on a team: report to the coordinating team.") : null)));
+      if (r.team) {
+        const lead = leadOf(r.team);
+        const sop = sopById(r.team.sop_id);
+        content.push(h('div', { class: 'actions ac-actions' },
+          sop ? h('a', { class: 'btn primary', href: '#/sops/' + encodeURIComponent(sop.id) }, `${r.unassigned ? r.team.name : 'Your'} team's procedure`) : null,
+          lead && lead.phone ? h('a', { class: 'btn', href: telHref(lead.phone) }, `Call ${lead.name} (${r.team.name} Lead)`) : null));
+      }
+      if (isAdmin()) content.push(h('div', { class: 'actions' }, h('button', { class: 'btn danger', onclick: () => endActivation(a) }, a.drill ? 'End drill (stand down)' : 'End activation (stand down)')));
+    }
+    if (teamsOn()) {
+      content.push(h('div', { class: 'section-title' }, 'All teams'));
+      for (const t of teamsSorted()) content.push(h('div', { class: `card team-admin tc-${t.color}` }, h('h3', {}, `${t.name} Team`), teamDetails(t, { showMembers: true })));
+    }
+    return { title: a ? 'Team activated' : 'Team activation', back: '#/alerts', content };
+  }
+
+  function activateTeam() {
+    openForm({
+      title: 'Activate Security Team',
+      intro: h('div', { class: 'notice urgent-notice' }, "This sends an urgent notification to every team member right now, telling each person to go to their team's Rally Point."),
+      fields: [
+        { name: 'drill', label: 'This is a drill', type: 'checkbox', hint: 'Notifications and the banner say DRILL.' },
+        { name: 'message', label: "What's happening (optional)", type: 'textarea', rows: 3, placeholder: 'e.g. Suspicious person at the north entrance' }
+      ],
+      submitLabel: 'Activate now',
+      submitClass: 'activate-btn',
+      onSubmit: async (v) => {
+        if (!confirm(v.drill ? 'Start a DRILL activation for the whole security team now?' : 'Activate the whole security team now? Everyone will be notified.')) throw new Error('Not activated.');
+        const { error } = await sb.rpc('activate_team', { p_message: v.message || '', p_drill: !!v.drill });
+        if (error) throw error;
+        notifyServer();
+        await refreshTable('team_activations');
+        location.hash = '#/activation';
+        render();
+        toast(v.drill ? 'Drill started. Everyone has been notified.' : 'Security team activated. Everyone has been notified.', 5000);
+      }
+    });
+  }
+
+  async function endActivation(a) {
+    if (!confirm(a.drill ? 'End the drill and tell everyone to stand down?' : 'End the activation and tell everyone to stand down?')) return;
+    const { error } = await sb.rpc('end_activation', { p_id: a.id });
+    if (error) { toast(friendlyError(error)); return; }
+    notifyServer();
+    await refreshTable('team_activations');
+    render();
+    toast('Stand down sent');
   }
 
   // ------------------------------------------------------------------
@@ -3697,7 +3957,15 @@
         h('a', { class: 'list-item', href: '#/attendance-setup' },
           h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Attendance form'),
             h('div', { class: 'sub' }, 'Sections, services, secretary email, export')),
-          icon('chev'))));
+          icon('chev')),
+        teamsOn() ? h('a', { class: 'list-item', href: '#/teams' },
+          h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Manage teams'),
+            h('div', { class: 'sub' }, 'Alpha, Bravo… leads, rally points, members')),
+          icon('chev')) : null,
+        teamsOn() ? h('a', { class: 'list-item', href: '#/activation' },
+          h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Team activation'),
+            h('div', { class: 'sub' }, 'Activate the whole security team')),
+          icon('chev')) : null));
     }
 
     if (!isStandalone()) {
@@ -3710,6 +3978,8 @@
             : h('p', { class: 'body-text' }, 'Open your browser menu (⋮) and choose "Install app" or "Add to Home screen".')));
     }
 
+    const mtc = myTeamCard();
+    if (mtc) content.push(h('div', { class: 'section-title' }, 'Your team'), mtc);
     content.push(h('div', { class: 'section-title' }, 'Notifications'), notificationsCard());
     content.push(h('div', { class: 'section-title' }, 'App'));
     content.push(h('div', { class: 'list' },
