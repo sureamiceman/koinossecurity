@@ -90,6 +90,19 @@ Emails are sent through [Resend](https://resend.com) from a domain verified ther
 
 Replies to the email go to whoever submitted the count, unless *Replies go to* is filled in. If an email can't be sent, the count is still saved and shows why; whoever submitted it (or an admin) can tap *Try again*.
 
+## Rolling back a release
+
+Every release is tagged in GitHub with its version (*Code → Tags*, e.g. `v1.13.0`), so you always know the last good point to return to. Phones follow automatically: when the site goes back to an older version, the app shows its update banner and moves everyone onto it.
+
+1. **Fastest (a minute, no code):** in Netlify, *Deploys* → open the last deploy before the feature → **Publish deploy**. The site is back on that version right away. This is temporary: the next merge to GitHub publishes the newest code again, so do step 2 if you've decided for good.
+2. **For good:** on GitHub, open the merged pull request for the feature → **Revert** → merge the pull request it creates. Netlify publishes the reverted code.
+3. **Database (optional):** features that added database tables come with an undo script in `supabase/rollback/`. Run it in the Supabase SQL editor *after* steps 1–2. Older versions of the app simply ignore the newer tables, so this is only for a clean removal. Each script says exactly what it removes and keeps.
+
+| Version | Feature | Pull request | Database undo |
+|---|---|---|---|
+| 1.14.0 | Teams (Alpha–Delta), team activation | #6 | `supabase/rollback/teams-down.sql` (keeps the starter SOPs unless you choose otherwise) |
+| 1.13.0 | Update banner, Reset app | #5 | none needed |
+
 ## Passwords
 
 - Anyone can change their own password under *More → Change password*.
