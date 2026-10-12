@@ -92,7 +92,7 @@ Replies to the email go to whoever submitted the count, unless *Replies go to* i
 
 ## Rolling back a release
 
-Every release is tagged in GitHub with its version (*Code → Tags*, e.g. `v1.13.0`), so you always know the last good point to return to. Phones follow automatically: when the site goes back to an older version, the app shows its update banner and moves everyone onto it.
+Mark each release in GitHub as a restore point: *Releases → Draft a new release → Choose a tag* → type the version (e.g. `v1.14.0`) → *Create new tag* on `main` → *Publish release*. Then you always know the last good point to return to. Phones follow automatically: when the site goes back to an older version, the app shows its update banner and moves everyone onto it.
 
 1. **Fastest (a minute, no code):** in Netlify, *Deploys* → open the last deploy before the feature → **Publish deploy**. The site is back on that version right away. This is temporary: the next merge to GitHub publishes the newest code again, so do step 2 if you've decided for good.
 2. **For good:** on GitHub, open the merged pull request for the feature → **Revert** → merge the pull request it creates. Netlify publishes the reverted code.
