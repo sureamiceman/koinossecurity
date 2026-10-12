@@ -1,7 +1,11 @@
 // Koinos Security service worker.
 // App files: network first (always fresh when online), cached copy when offline.
 // Supabase data requests are never touched here; the app keeps its own offline copy.
-const CACHE = 'koinos-shell-v4';
+//
+// VERSION must change with every release (keep it equal to appVersion in
+// config.js): a changed file is how phones notice there's a new version.
+const VERSION = '1.13.0';
+const CACHE = 'koinos-shell-' + VERSION;
 const SHELL = [
   '/', '/index.html', '/styles.css', '/app.js', '/config.js',
   '/vendor/supabase.js', '/manifest.webmanifest',
@@ -9,15 +13,39 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' = straight from the server, never the browser's own saved copy.
+  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
+
+// Ask an open app which version it is running. Apps from before version
+// 1.13.0 can't answer, which is how we spot them.
+function askVersion(client, ms = 1500) {
+  return new Promise((resolve) => {
+    const ch = new MessageChannel();
+    const t = setTimeout(() => resolve(null), ms);
+    ch.port1.onmessage = (e) => { clearTimeout(t); resolve((e.data && e.data.version) || null); };
+    try { client.postMessage({ type: 'version?' }, [ch.port2]); } catch { clearTimeout(t); resolve(null); }
+  });
+}
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
     await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
     await self.clients.claim();
+    // An old app that's open (often an installed app resumed from the
+    // background, which never reloads by itself) is reloaded once onto this
+    // version. Newer apps answer and show their own "update" banner instead.
+    // (The reload is started, not waited for: a page can't load through this
+    // helper until it has finished starting up, so waiting would deadlock.)
+    const wins = await self.clients.matchAll({ type: 'window' });
+    const answers = await Promise.all(wins.map((w) => askVersion(w)));
+    wins.forEach((w, i) => { if (!answers[i]) w.navigate(w.url).catch(() => { /* the app's own check will catch it */ }); });
   })());
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'skip-waiting') self.skipWaiting();
 });
 
 self.addEventListener('fetch', (event) => {
@@ -25,11 +53,16 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
+  if (url.pathname === '/config.js' && url.searchParams.has('check')) return;   // the app's "is there a new version?" check
 
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
     try {
-      const res = await fetch(req);
+      // cache: 'no-cache' = always ask the server whether the file changed
+      // (cheap when it hasn't), so an old copy is never reused by mistake.
+      const res = req.mode === 'navigate'
+        ? await fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' })
+        : await fetch(req, { cache: 'no-cache' });
       if (res.ok) cache.put(req.mode === 'navigate' ? '/index.html' : req, res.clone());
       return res;
     } catch (err) {

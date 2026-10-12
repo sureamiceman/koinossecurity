@@ -23,6 +23,9 @@ Progressive Web App (PWA) for the Koinos church security team. It installs on iP
 
 Works offline with the last-loaded information (text only; photos need a connection).
 
+**Updates.** The app checks for a newer version when it opens, when it comes back to the screen and every 30 minutes, and shows a yellow *A new version of the app is available → Update now* banner. *More → App version* shows the version, has *Check for updates*, and *Reset app* (reloads a fresh copy of the app on that device; you stay signed in, notifications stay on). Phones still running a version from before 1.13.0 are moved onto the new version automatically the next time they check in.
+When releasing, change the version in **both** `public/config.js` (`appVersion`) and `public/sw.js` (`VERSION`).
+
 ## Roles
 
 | Role | Can do |

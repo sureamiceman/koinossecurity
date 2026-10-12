@@ -1023,6 +1023,7 @@
         h('h1', {}, v.title),
         v.action || null),
       navigator.onLine ? null : h('div', { class: 'offline-bar' }, 'Offline — showing saved information'),
+      updateBar(),
       h('main', {}, v.content),
       h('nav', { class: 'tabbar', 'aria-label': 'Main' }, TABS.map(([key, label, ic]) => {
         const count = key === 'alerts' ? alertCount : key === 'more' ? moreCount : key === 'schedule' ? coverCount() + myAskedShifts().length : key === 'board' && activeTab !== 'board' ? unseenBoard() : key === 'attendance' ? openCountsCount() : 0;
@@ -3715,7 +3716,16 @@
       h('button', { class: 'list-item', onclick: changeMyPassword }, h('div', { class: 'grow title' }, 'Change password')),
       h('button', { class: 'list-item', onclick: () => refreshAll(true) }, h('div', { class: 'grow title' }, 'Refresh data')),
       h('button', { class: 'list-item', onclick: () => { if (confirm('Sign out of Koinos Security on this device?')) signOut(); } }, h('div', { class: 'grow title' }, 'Sign out'))));
-    content.push(h('p', { class: 'muted small center' }, `Koinos Security v${cfg.appVersion}`));
+    content.push(h('div', { class: 'section-title' }, 'App version'));
+    content.push(h('div', { class: 'card' },
+      h('div', { class: 'row' },
+        h('div', { class: 'grow' }, h('strong', {}, `Version ${cfg.appVersion}`),
+          h('div', { class: 'muted small' }, state.updateAvailable ? `Version ${state.updateAvailable} is available.` : state.updateCheckedAt ? 'Up to date (checked ' + relTime(new Date(state.updateCheckedAt).toISOString()) + ')' : '')),
+        state.updateAvailable
+          ? h('button', { class: 'btn small primary', onclick: (e) => applyUpdate(e.currentTarget) }, 'Update now')
+          : h('button', { class: 'btn small', onclick: (e) => checkForUpdate({ manual: true, btn: e.currentTarget }) }, 'Check for updates')),
+      h('p', { class: 'hint' }, 'Updates install by themselves. If the app still looks out of date, use Reset app: it clears the saved copy of the app on this device and reloads it. You stay signed in.'),
+      h('button', { class: 'btn small', onclick: resetApp }, 'Reset app')));
     return { title: 'More', content };
   }
 
@@ -3855,6 +3865,85 @@
   }
 
   // ------------------------------------------------------------------
+  // App updates. The app checks the server's version when it starts, when
+  // it comes back to the screen, every 30 minutes and on "Check for
+  // updates", and shows a banner with an Update button when it's newer.
+  // ------------------------------------------------------------------
+  async function serverVersion() {
+    const res = await fetch('/config.js?check=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) throw new Error('Could not reach the server');
+    const m = /appVersion\s*:\s*["']([^"']+)["']/.exec(await res.text());
+    if (!m) throw new Error('Could not read the version');
+    return m[1];
+  }
+  async function checkForUpdate({ manual = false, btn = null } = {}) {
+    if (!navigator.onLine) { if (manual) toast("You're offline. Try again when you're connected."); return; }
+    if (!manual && Date.now() - (state.updateCheckedAt || 0) < 60000) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+    try {
+      const v = await serverVersion();
+      state.updateCheckedAt = Date.now();
+      const newer = v !== cfg.appVersion ? v : null;
+      if (newer !== (state.updateAvailable || null)) { state.updateAvailable = newer; render(); }
+      else if (manual) render();
+      if (manual) toast(newer ? `Version ${newer} is available. Tap Update now.` : `You're on the latest version (${cfg.appVersion}).`);
+      // Let the browser fetch the new offline helper too.
+      if (newer && 'serviceWorker' in navigator) navigator.serviceWorker.getRegistration().then((r) => r && r.update()).catch(() => {});
+    } catch (e) {
+      if (manual) { toast(friendlyError(e)); if (btn) { btn.disabled = false; btn.textContent = 'Check for updates'; } }
+    }
+  }
+
+  function updateBar() {
+    if (!state.updateAvailable) return null;
+    return h('div', { class: 'update-bar', role: 'status' },
+      h('div', { class: 'grow' }, h('strong', {}, 'A new version of the app is available'), h('div', { class: 'small' }, `Version ${state.updateAvailable} (you have ${cfg.appVersion})`)),
+      h('button', { class: 'btn small', onclick: (e) => applyUpdate(e.currentTarget) }, 'Update now'));
+  }
+
+  // Clears this device's saved copy of the app and loads the new one.
+  // Sign-in, notifications and the offline data are kept.
+  async function clearAppCache() {
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) {
+          await reg.update().catch(() => {});
+          const waiting = reg.waiting || reg.installing;
+          if (waiting) waiting.postMessage({ type: 'skip-waiting' });
+        }
+      }
+    } catch { /* keep going */ }
+    try { if (window.caches) await Promise.all((await caches.keys()).map((k) => caches.delete(k))); } catch { /* keep going */ }
+  }
+  function reloadFresh() {
+    sessionStorage.setItem('koinos:updatingFrom', cfg.appVersion);
+    location.replace('/?v=' + Date.now() + location.hash);   // a new address, so nothing old can be reused
+  }
+  async function applyUpdate(btn) {
+    if (document.querySelector('dialog[open]') && !confirm('Update now? Anything you haven\'t saved in the open window will be lost.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Updating…'; }
+    await clearAppCache();
+    reloadFresh();
+  }
+  async function resetApp() {
+    if (!confirm('Reset the app on this device? It reloads a fresh copy of the app. You stay signed in, and nothing on the server changes.')) return;
+    toast('Resetting…');
+    await clearAppCache();
+    // The offline copy of team data is re-downloaded on the next start.
+    try { Object.keys(localStorage).filter((k) => k.startsWith(CP + 'data:')).forEach((k) => localStorage.removeItem(k)); } catch { /* ignore */ }
+    reloadFresh();
+  }
+  // After an update: tidy the address bar, and say whether it worked.
+  function afterUpdateLoad() {
+    let from = null;
+    try { from = sessionStorage.getItem('koinos:updatingFrom'); sessionStorage.removeItem('koinos:updatingFrom'); } catch { /* ignore */ }
+    if (/[?&]v=\d+/.test(location.search)) history.replaceState(null, '', '/' + location.hash);
+    if (from && from !== cfg.appVersion) setTimeout(() => toast(`Updated to version ${cfg.appVersion}`), 600);
+    else if (from) setTimeout(() => checkForUpdate({}), 1500);
+  }
+
+  // ------------------------------------------------------------------
   // Render
   // ------------------------------------------------------------------
   function render() {
@@ -3867,6 +3956,7 @@
     else if (!state.profile.full_name) view = nameView();
     else if (!isMember()) view = pendingView();
     else view = mainView();
+    if (view.className !== 'shell' && state.updateAvailable) view = h('div', {}, updateBar(), view);
     const act = document.activeElement;
     const keep = act && act.id && app.contains(act) ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
     app.replaceChildren(view);
@@ -3892,17 +3982,25 @@
     state.lastSeenAlerts = Number(cacheGet('lastSeenAlerts')) || 0;
     state.lastSeenBoard = Number(cacheGet('lastSeenBoard')) || 0;
     state.sopTab = cacheGet('sopTab');
-    if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'open' && e.data.hash) location.hash = e.data.hash; });
+    if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', (e) => {
+      if (e.data && e.data.type === 'open' && e.data.hash) location.hash = e.data.hash;
+      // The offline helper asks which version is running (old versions can't answer and get reloaded).
+      if (e.data && e.data.type === 'version?' && e.ports && e.ports[0]) e.ports[0].postMessage({ version: cfg.appVersion });
+    });
+    afterUpdateLoad();
 
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});
     }
     window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); state.installPrompt = e; });
     window.addEventListener('hashchange', () => { window.scrollTo(0, 0); render(); });
-    window.addEventListener('online', () => { render(); if (isMember()) refreshAll(); });
+    window.addEventListener('online', () => { render(); if (isMember()) refreshAll(); checkForUpdate({}); });
+    setTimeout(() => checkForUpdate({}), 4000);
+    setInterval(() => checkForUpdate({}), 30 * 60000);
     window.addEventListener('offline', render);
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && isMember()) refreshAll();
+      if (document.visibilityState === 'visible') checkForUpdate({});
     });
 
     const { data } = await sb.auth.getSession();

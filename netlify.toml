@@ -26,3 +26,22 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
   external_node_modules = ["web-push"]
+
+# App files: browsers must check for a newer copy every time (cheap when
+# unchanged), so a phone is never left running an old version.
+[[headers]]
+  for = "/"
+  [headers.values]
+    Cache-Control = "no-cache"
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "no-cache"
+[[headers]]
+  for = "/app.js"
+  [headers.values]
+    Cache-Control = "no-cache"
+[[headers]]
+  for = "/styles.css"
+  [headers.values]
+    Cache-Control = "no-cache"
