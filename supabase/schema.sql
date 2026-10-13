@@ -662,6 +662,18 @@ create table if not exists public.rotation_slots (
 );
 
 -- Who a template post should go to on a given date.
+-- A post can be "not used" on a week of the month (e.g. only two posts on
+-- 5th Sundays): no post is created on those dates.
+alter table public.rotation_slots add column if not exists skip boolean not null default false;
+create or replace function public.template_skip(p_post uuid, d date) returns boolean
+language sql stable security definer set search_path = public as $$
+  select coalesce((select rs.skip from public.rotation_slots rs
+                     join public.series_posts sp on sp.id = rs.series_post_id
+                     join public.event_series s on s.id = sp.series_id
+                    where rs.series_post_id = p_post and s.use_rotation
+                      and rs.week_of_month = ceil(extract(day from d) / 7.0)::int), false)
+$$;
+
 create or replace function public.template_roster(p_post uuid, p_default uuid, d date) returns uuid
 language sql stable security definer set search_path = public as $$
   select case when s.use_rotation
@@ -809,7 +821,17 @@ begin
     join public.series_posts sp on sp.series_id = s.id
    where e.series_id = s.id and e.occurrence_date >= p_from and not e.is_exception
      and sp.id = any(coalesce(p_new_posts, '{}'))
+     and not public.template_skip(sp.id, e.occurrence_date)
      and not exists (select 1 from public.shifts x where x.event_id = e.id and x.series_post_id = sp.id);
+
+  -- Weeks where a post is "not used": remove it from those dates, unless
+  -- someone made a one-off change to it there (a swap, cover or volunteer).
+  delete from public.shifts sh
+   using public.series_posts sp, public.events e
+   where sh.series_post_id = sp.id and sp.series_id = s.id and e.id = sh.event_id
+     and e.occurrence_date >= p_from and not e.is_exception
+     and sh.assignee_from_template and not sh.custom
+     and public.template_skip(sp.id, e.occurrence_date);
 
   perform set_config('koinos.template', '', true);
 end $$;
@@ -845,7 +867,7 @@ begin
       select ev, sp.post, sp.requires_ccw, public.template_roster(sp.id, sp.roster_id, d), true, sp.id, sp.note, sp.sort_order,
              case when sp.start_time is null then null else public.local_ts(d, sp.start_time, s.time_zone) end,
              case when sp.start_time is null then null else public.local_end_ts(d, sp.start_time, coalesce(sp.end_time, s.end_time), s.time_zone) end
-        from public.series_posts sp where sp.series_id = s.id;
+        from public.series_posts sp where sp.series_id = s.id and not public.template_skip(sp.id, d);
     end if;
   end loop;
   perform set_config('koinos.template', '', true);
@@ -1033,6 +1055,7 @@ declare
   sid      uuid;
   v_replace boolean := coalesce((p->>'replace_changes')::boolean, false);
   sids     uuid[] := '{}';
+  unskip   jsonb := '[]';
   n_upd    int := 0;
   n_kept   int := 0;
   n_days   int := 0;
@@ -1050,9 +1073,17 @@ begin
       if not exists (select 1 from public.series_posts where id = (sl->>'series_post_id')::uuid and series_id = sid) then
         continue;  -- post was removed meanwhile
       end if;
-      insert into public.rotation_slots (series_post_id, week_of_month, roster_id)
-      values ((sl->>'series_post_id')::uuid, (sl->>'week')::int, nullif(sl->>'roster_id', '')::uuid)
-      on conflict (series_post_id, week_of_month) do update set roster_id = excluded.roster_id;
+      -- Was this post "not used" on this week, and now it is? Remember it, to put it back.
+      if exists (select 1 from public.rotation_slots where series_post_id = (sl->>'series_post_id')::uuid
+                    and week_of_month = (sl->>'week')::int and skip)
+         and not coalesce((sl->>'skip')::boolean, false) then
+        unskip := unskip || jsonb_build_object('post', sl->>'series_post_id', 'week', (sl->>'week')::int);
+      end if;
+      insert into public.rotation_slots (series_post_id, week_of_month, roster_id, skip)
+      values ((sl->>'series_post_id')::uuid, (sl->>'week')::int,
+              case when coalesce((sl->>'skip')::boolean, false) then null else nullif(sl->>'roster_id', '')::uuid end,
+              coalesce((sl->>'skip')::boolean, false))
+      on conflict (series_post_id, week_of_month) do update set roster_id = excluded.roster_id, skip = excluded.skip;
     end loop;
   end loop;
 
@@ -1084,11 +1115,82 @@ begin
     perform public.apply_series(sid, current_date, '{}');
   end loop;
 
+  -- Posts that are used again on a week: add them back to those dates.
+  perform set_config('koinos.template', 'on', true);
+  insert into public.shifts (event_id, post, requires_ccw, roster_id, assignee_from_template, series_post_id, note, sort_order, starts_at, ends_at)
+  select e.id, sp.post, sp.requires_ccw, public.template_roster(sp.id, sp.roster_id, e.occurrence_date), true, sp.id, sp.note, sp.sort_order,
+         case when sp.start_time is null then null else public.local_ts(e.occurrence_date, sp.start_time, s.time_zone) end,
+         case when sp.start_time is null then null else public.local_end_ts(e.occurrence_date, sp.start_time, coalesce(sp.end_time, s.end_time), s.time_zone) end
+    from jsonb_array_elements(unskip) u
+    join public.series_posts sp on sp.id = (u->>'post')::uuid
+    join public.event_series s on s.id = sp.series_id
+    join public.events e on e.series_id = s.id
+   where e.occurrence_date >= current_date and not e.is_exception
+     and ceil(extract(day from e.occurrence_date) / 7.0)::int = (u->>'week')::int
+     and not exists (select 1 from public.shifts x where x.event_id = e.id and x.series_post_id = sp.id);
+  perform set_config('koinos.template', '', true);
+
   select count(distinct e.occurrence_date) into n_days
     from public.events e where e.series_id = any(sids) and e.occurrence_date >= current_date;
 
   return jsonb_build_object('updated', n_upd, 'kept', n_kept, 'sundays', n_days);
 end $$;
+
+-- Admins: change a repeating service's positions (posts) from today on,
+-- without touching anyone's assignments on the other posts.
+--   p_posts = [{id?, post, requires_ccw}] in order. Posts left out are
+--   removed (with their rotation) from upcoming dates; new posts are added
+--   to upcoming dates as Open until someone is picked in the grid.
+create or replace function public.save_series_positions(p_series uuid, p_posts jsonb) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  pj jsonb; pid uuid; n int := 0;
+  kept uuid[] := '{}'; added uuid[] := '{}'; names text[] := '{}';
+  nm text; n_removed int := 0;
+begin
+  if not public.is_admin() then raise exception 'Only admins can change the schedule'; end if;
+  if not exists (select 1 from public.event_series where id = p_series) then raise exception 'Repeating service not found'; end if;
+  if jsonb_typeof(p_posts) <> 'array' or jsonb_array_length(p_posts) = 0 then raise exception 'Keep at least one position.'; end if;
+  for pj in select * from jsonb_array_elements(p_posts) loop
+    nm := trim(coalesce(pj->>'post', ''));
+    if nm = '' then raise exception 'Every position needs a name.'; end if;
+    if lower(nm) = any(names) then raise exception 'Two positions are both named "%".', nm; end if;
+    names := names || lower(nm);
+  end loop;
+
+  for pj in select * from jsonb_array_elements(p_posts) loop
+    pid := nullif(pj->>'id', '')::uuid;
+    if pid is not null and exists (select 1 from public.series_posts where id = pid and series_id = p_series) then
+      update public.series_posts set post = trim(pj->>'post'), requires_ccw = coalesce((pj->>'requires_ccw')::boolean, false), sort_order = n
+       where id = pid;
+    else
+      insert into public.series_posts (series_id, post, requires_ccw, sort_order)
+      values (p_series, trim(pj->>'post'), coalesce((pj->>'requires_ccw')::boolean, false), n)
+      returning id into pid;
+      added := added || pid;
+    end if;
+    kept := kept || pid;
+    n := n + 1;
+  end loop;
+
+  perform set_config('koinos.template', 'on', true);
+  with gone as (
+    delete from public.shifts sh using public.events e, public.series_posts sp
+     where sh.event_id = e.id and sh.series_post_id = sp.id and sp.series_id = p_series
+       and not (sp.id = any(kept)) and e.occurrence_date >= current_date and not e.is_exception
+    returning 1)
+  select count(*) into n_removed from gone;
+  perform set_config('koinos.template', '', true);
+  delete from public.series_posts where series_id = p_series and not (id = any(kept));
+
+  perform public.apply_series(p_series, current_date, added);
+  perform public.materialize_series(p_series, current_date, false);
+  return jsonb_build_object('added', coalesce(array_length(added, 1), 0), 'removed_posts', n_removed);
+end $$;
+revoke all on function public.save_series_positions(uuid, jsonb) from public, anon;
+grant execute on function public.save_series_positions(uuid, jsonb) to authenticated;
+revoke all on function public.template_skip(uuid, date) from public, anon;
+grant execute on function public.template_skip(uuid, date) to authenticated;
 
 -- Stop using the rotation for a service (its posts go back to their default person).
 create or replace function public.clear_rotation(p_series uuid) returns void

@@ -3132,6 +3132,7 @@
   const postsOfSeries = (sid) => state.data.series_posts.filter((p) => p.series_id === sid).sort((a, b) => a.sort_order - b.sort_order);
   // Grid cells are keyed by post id of the service's latest series.
   const slotKey = (postId, week) => postId + ':' + week;
+  const NOT_USED = '__skip';   // the post isn't staffed that week (e.g. only two posts on 5th Sundays)
 
   // Working copy of the grid, kept across re-renders until applied or reset.
   function assignDraft(services) {
@@ -3140,7 +3141,7 @@
       const k = slotKey(p.id, w);
       if (k in a.draft) continue;
       const slot = state.data.rotation_slots.find((r) => r.series_post_id === p.id && r.week_of_month === w);
-      a.draft[k] = s.use_rotation ? (slot && slot.roster_id) || '' : p.roster_id || '';
+      a.draft[k] = s.use_rotation ? (slot && slot.skip ? NOT_USED : (slot && slot.roster_id) || '') : p.roster_id || '';
     }
     return a;
   }
@@ -3174,6 +3175,12 @@
 
     content.push(h('p', { class: 'muted small' },
       'Pick who serves each post by week of the month, then apply. Every matching Sunday in the next 6 months is filled in, and new months keep filling in from this grid automatically.'));
+    content.push(h('div', { class: 'card positions-card' },
+      h('h3', {}, 'Positions'),
+      services.map((g) => h('div', { class: 'pos-line' },
+        h('div', { class: 'grow' }, h('strong', {}, g.title), h('div', { class: 'muted small' }, postsOfSeries(g.main.id).map((p) => p.post + (p.requires_ccw ? ' (CCW pref.)' : '')).join(' · ') || 'No positions')),
+        h('button', { class: 'btn small', onclick: () => editPositions(g) }, 'Edit positions'))),
+      h('p', { class: 'hint' }, 'Add, remove, rename or reorder positions. Everyone\'s assignments on the other positions stay as they are.')));
     if (a.result) content.push(h('div', { class: 'card success-card' }, a.result));
 
     // Rows = post names across services, in template order.
@@ -3185,7 +3192,7 @@
       const dates = sundaysForWeek(w);
       const warnings = [];
       // Duplicates within a service, CCW problems, people on both services.
-      const perService = services.map((s) => postsOfSeries(s.id).map((p) => ({ s, p, id: a.draft[slotKey(p.id, w)] })).filter((x) => x.id));
+      const perService = services.map((s) => postsOfSeries(s.id).map((p) => ({ s, p, id: a.draft[slotKey(p.id, w)] })).filter((x) => x.id && x.id !== NOT_USED));
       const dupCells = new Set();
       perService.forEach((cells) => {
         const seen = {};
@@ -3210,8 +3217,9 @@
             const p = postsOfSeries(s.id).find((x) => x.post === name);
             if (!p) return h('td', { class: 'muted small' }, '—');
             const k = slotKey(p.id, w);
-            const sel = h('select', { class: 'input assign-sel' + (dupCells.has(k) || ccwCells.has(k) ? ' warn' : ''), 'aria-label': `${WEEK_LABELS[w - 1]} Sunday, ${s.title}, ${name}` },
+            const sel = h('select', { class: 'input assign-sel' + (dupCells.has(k) || ccwCells.has(k) ? ' warn' : '') + (a.draft[k] === NOT_USED ? ' not-used' : ''), 'aria-label': `${WEEK_LABELS[w - 1]} Sunday, ${s.title}, ${name}` },
               h('option', { value: '' }, '— Open —'),
+              h('option', { value: NOT_USED }, '✕ Not used this week'),
               people.map((r) => h('option', { value: r.id }, r.name + (ccwOkForever(r) ? ' · CCW' : ''))),
               a.draft[k] && !people.some((r) => r.id === a.draft[k]) ? h('option', { value: a.draft[k] }, rosterName(a.draft[k]) + ' (inactive)') : null);
             sel.value = a.draft[k] || '';
@@ -3224,6 +3232,7 @@
           h('h3', { class: 'grow' }, `${WEEK_LABELS[w - 1]} Sunday`),
           w > 1 ? h('button', { class: 'btn small', onclick: () => copyWeek(services, w - 1, w) }, `Copy ${WEEK_LABELS[w - 2]}`) : null),
         h('div', { class: 'muted tiny' }, dates.length ? 'Next 6 months: ' + dates.map(shortDate).join(', ') : 'No months in the next 6 have a 5th Sunday.'),
+        w === 5 ? h('div', { class: 'hint' }, 'Fewer posts on 5th Sundays? Pick "✕ Not used this week" for those posts: they won\'t appear on the schedule that day.') : null,
         h('div', { class: 'assign-scroll' }, table),
         warnings.length ? h('div', { class: 'notice small' }, [...new Set(warnings)].join(' ')) : null,
         both.length ? h('div', { class: 'muted tiny' }, 'On both services: ' + both.map(rosterName).join(', ')) : null));
@@ -3237,9 +3246,68 @@
         h('div', { class: 'hint' }, 'Off (recommended): swaps, covers, volunteers and changes an admin made on a specific date are kept. On: every Sunday is reset to this grid.')),
       h('button', { class: 'btn primary block', onclick: (e) => applyRotation(services, e.currentTarget) }, 'Apply to next 6 months'),
       a.dirty ? h('button', { class: 'btn block', onclick: () => { state.assign = null; render(); } }, 'Discard changes') : null,
-      services.filter((s) => s.use_rotation).length ? h('p', { class: 'muted tiny' }, 'Services and posts come from the repeating Sunday events. To add a post or change times, edit the event on the Schedule tab (All events).') : null));
+      h('p', { class: 'muted tiny' }, 'To change a service\'s times, edit the event on the Schedule tab (All events).')));
 
     return { title: 'Update assignments', back: '#/schedule', content };
+  }
+
+  // Admins: a service's positions, without redoing the rotation.
+  function editPositions(g) {
+    const rows = postsOfSeries(g.main.id).map((p) => ({ id: p.id, post: p.post, requires_ccw: !!p.requires_ccw, was: p.post, k: newKey() }));
+    const list = h('div', { class: 'tab-editor' });
+    const draw = () => list.replaceChildren(...rows.map((r, i) => {
+      const name = h('input', { type: 'text', class: 'input', value: r.post, maxlength: 60, placeholder: 'Position (e.g. Parking Lot)', 'aria-label': 'Position name', id: 'pe_' + r.k });
+      name.addEventListener('input', () => { r.post = name.value; });
+      const ccw = h('input', { type: 'checkbox', id: 'pc_' + r.k });
+      ccw.checked = r.requires_ccw;
+      ccw.addEventListener('change', () => { r.requires_ccw = ccw.checked; });
+      return h('div', { class: 'te-row' },
+        h('div', { class: 'te-line' },
+          h('span', { class: 'te-num' }, i + 1),
+          name,
+          h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Move up', disabled: i === 0 || null, onclick: () => { [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); } }, '↑'),
+          h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Move down', disabled: i === rows.length - 1 || null, onclick: () => { [rows[i + 1], rows[i]] = [rows[i], rows[i + 1]]; draw(); } }, '↓'),
+          h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Remove position', onclick: () => {
+            if (rows.length === 1) { toast('Keep at least one position.'); return; }
+            if (r.id && !confirm(`Remove "${r.was}" from ${g.title}? It comes off every upcoming Sunday (including anyone covering it), and its rotation is cleared. The other positions keep their people.`)) return;
+            rows.splice(i, 1); draw();
+          } }, icon('x'))),
+        h('label', { class: 'as-check', for: 'pc_' + r.k }, ccw, 'CCW preferred'));
+    }));
+    draw();
+    openDialog({
+      title: `Positions: ${g.title}`,
+      body: [
+        h('p', { class: 'muted small dlg-intro' }, 'Changes apply from today on. A new position starts Open on every Sunday: pick its people in the grid. Renaming keeps its people. For a post that isn\'t staffed on some weeks (like 5th Sundays), keep it here and choose "Not used this week" in the grid instead.'),
+        list,
+        h('button', { type: 'button', class: 'btn small', onclick: () => { const r = { id: null, post: '', requires_ccw: false, was: '', k: newKey() }; rows.push(r); draw(); const el = document.getElementById('pe_' + r.k); if (el) el.focus(); } }, '+ Add position')
+      ],
+      buttons: (close) => [
+        h('button', { class: 'btn', onclick: close }, 'Cancel'),
+        h('button', { class: 'btn primary', onclick: async (e) => {
+          const btn = e.currentTarget;
+          const clean = rows.map((r) => ({ ...r, post: r.post.trim() }));
+          if (clean.some((r) => !r.post)) { toast('Every position needs a name.'); return; }
+          btn.disabled = true;
+          try {
+            // The service's current series by id; any other active series of the same service by name.
+            for (const sr of g.series) {
+              const own = postsOfSeries(sr.id);
+              const posts = clean.map((r) => {
+                const match = sr.id === g.main.id ? (r.id && own.find((p) => p.id === r.id)) : (r.was && own.find((p) => p.post === r.was));
+                return { id: match ? match.id : null, post: r.post, requires_ccw: r.requires_ccw };
+              });
+              const { error } = await sb.rpc('save_series_positions', { p_series: sr.id, p_posts: posts });
+              if (error) throw error;
+            }
+          } catch (ex) { toast(friendlyError(ex), 6000); btn.disabled = false; return; }
+          close();
+          await Promise.all(['events', 'shifts', 'series_posts', 'rotation_slots'].map(refreshTable));
+          render();
+          toast('Positions saved. Everyone else\'s assignments are unchanged.', 4500);
+        } }, 'Save')
+      ]
+    });
   }
 
   function copyWeek(services, from, to) {
@@ -3265,7 +3333,10 @@
           series_id: sr.id,
           slots: postsOfSeries(sr.id).flatMap((p) => {
             const mp = mainPosts.find((x) => x.post === p.post);
-            return mp ? [1, 2, 3, 4, 5].map((w) => ({ series_post_id: p.id, week: w, roster_id: a.draft[slotKey(mp.id, w)] || null })) : [];
+            return mp ? [1, 2, 3, 4, 5].map((w) => {
+              const v = a.draft[slotKey(mp.id, w)];
+              return v === NOT_USED ? { series_post_id: p.id, week: w, skip: true } : { series_post_id: p.id, week: w, roster_id: v || null };
+            }) : [];
           })
         }));
       })
