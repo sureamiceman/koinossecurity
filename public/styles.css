@@ -642,3 +642,14 @@ dialog.wide { width: min(940px, 100vw); max-width: 100vw; }
 .activation-card .ac-message { font-weight: 600; margin: 10px 0 0; white-space: pre-wrap; }
 .activation-card .ac-go { margin-top: 12px; font-size: 1.15rem; }
 .ac-actions .btn { flex: 1 1 auto; }
+
+/* ---------- Contact tabs ---------- */
+.tc-navy { --tc: #173a5e; --tc-bg: #e6edf5; }
+@media (prefers-color-scheme: dark) { .tc-navy { --tc: #8fb4dc; --tc-bg: #15283c; } }
+.list.flat { border: 0; border-radius: 0; box-shadow: none; background: transparent; }
+.sop-panel .list-item { padding-left: 14px; padding-right: 14px; }
+.contact-sub { font-size: .74rem; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; color: var(--tc, var(--muted)); padding: 10px 14px 4px; border-top: 1px solid var(--border); }
+.sop-panel .list > .contact-sub:first-child, .sop-panel-head + .contact-sub { border-top: 0; }
+.sop-panel-foot .grow { align-self: center; }
+.med-notes { color: var(--medical); font-weight: 600; }
+.contact-row .btn.small { margin-top: 6px; }

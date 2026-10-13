@@ -366,6 +366,71 @@ drop trigger if exists contacts_stamp on public.contacts;
 create trigger contacts_stamp before insert or update on public.contacts
   for each row execute function public.stamp_row();
 
+-- Contact tabs: the categories shown as colored tabs on the Contacts
+-- screen, in the admins' chosen order (like SOP tabs). Contacts refer to
+-- their tab by name; renaming a tab renames it on its contacts too. The
+-- "Security Team" and "Medical" tabs are built in (from the roster).
+create table if not exists public.contact_categories (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null unique,
+  color       text not null default 'gray'
+              check (color in ('red','orange','yellow','green','teal','blue','purple','pink','gray')),
+  sort_order  int  not null default 0
+);
+
+-- First run (and whenever a contact uses a category with no tab): add it.
+insert into public.contact_categories (name, color, sort_order)
+select c, 'gray', 100 + row_number() over (order by c)
+  from (select distinct category c from public.contacts where category <> '') x
+on conflict (name) do nothing;
+
+-- Admins: save every tab at once, in order. p = [{id?, name, color}, …]
+-- A renamed tab renames its contacts; contacts on a removed tab move to the first tab.
+create or replace function public.save_contact_categories(p jsonb) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  t jsonb; i int := 0; t_id uuid; new_name text; first_name text;
+  keep uuid[] := '{}'; names text[] := '{}';
+begin
+  if not public.is_admin() then raise exception 'Not authorized'; end if;
+  if jsonb_typeof(p) <> 'array' or jsonb_array_length(p) = 0 then raise exception 'Keep at least one tab.'; end if;
+  for t in select * from jsonb_array_elements(p) loop
+    new_name := trim(coalesce(t->>'name', ''));
+    if new_name = '' then raise exception 'Every tab needs a name.'; end if;
+    if new_name like '~%' then raise exception 'Tab names can''t start with ~.'; end if;
+    if length(new_name) > 40 then raise exception 'Tab names can be at most 40 characters.'; end if;
+    if lower(new_name) in ('security team', 'all') then raise exception '"%" is a built-in tab. Pick another name.', new_name; end if;
+    if lower(new_name) = any(names) then raise exception 'Two tabs are both named "%".', new_name; end if;
+    if coalesce(t->>'color', 'gray') not in ('red','orange','yellow','green','teal','blue','purple','pink','gray') then
+      raise exception 'Unknown color "%".', t->>'color';
+    end if;
+    names := names || lower(new_name);
+  end loop;
+  -- 1. Point contacts at their tab's id while names change (tabs can swap names).
+  update public.contacts c set category = '~' || k.id::text from public.contact_categories k where c.category = k.name;
+  update public.contact_categories set name = '~' || id::text where true;
+  -- 2. Save the tabs in order.
+  for t in select * from jsonb_array_elements(p) loop
+    t_id := nullif(t->>'id', '')::uuid;
+    new_name := trim(t->>'name');
+    if t_id is not null and exists (select 1 from public.contact_categories where id = t_id) then
+      update public.contact_categories set name = new_name, color = coalesce(t->>'color', 'gray'), sort_order = i where id = t_id;
+    else
+      insert into public.contact_categories (name, color, sort_order) values (new_name, coalesce(t->>'color', 'gray'), i) returning id into t_id;
+    end if;
+    if i = 0 then first_name := new_name; end if;
+    keep := keep || t_id;
+    i := i + 1;
+  end loop;
+  -- 3. Contacts follow their tab's (new) name; removed tabs' contacts go to the first tab.
+  update public.contacts c set category = k.name from public.contact_categories k
+   where c.category = '~' || k.id::text and k.id = any(keep);
+  delete from public.contact_categories where not (id = any(keep));
+  update public.contacts set category = first_name where category like '~%';
+end $$;
+revoke all on function public.save_contact_categories(jsonb) from public, anon;
+grant execute on function public.save_contact_categories(jsonb) to authenticated;
+
 -- ---------------------------------------------------------------------
 -- Safety bulletins / BOLO
 -- ---------------------------------------------------------------------
@@ -1254,7 +1319,7 @@ grant execute on function public.calendar_feed(text) to anon, authenticated;
 do $$
 declare t text;
 begin
-  foreach t in array array['sops','sop_categories','contacts','bulletins','roster','events','shifts','event_series','series_posts','rotation_slots'] loop
+  foreach t in array array['sops','sop_categories','contacts','contact_categories','bulletins','roster','events','shifts','event_series','series_posts','rotation_slots'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('drop policy if exists %I on public.%I', t || '_select', t);
     execute format('drop policy if exists %I on public.%I', t || '_insert', t);

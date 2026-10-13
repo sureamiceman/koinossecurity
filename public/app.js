@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [] });
   const state = {
     session: null,
     profile: null,
@@ -394,6 +394,7 @@
     bulletins: (t) => t.select('*').order('created_at', { ascending: false }),
     sops: (t) => t.select('*').order('category').order('sort_order').order('title'),
     sop_categories: (t) => t.select('*').order('sort_order'),
+    contact_categories: (t) => t.select('*').order('sort_order'),
     contacts: (t) => t.select('*').order('category').order('sort_order').order('name'),
     roster: (t) => t.select('*').order('sort_order').order('name'),
     profiles: (t) => t.select('*').order('full_name'),
@@ -415,7 +416,7 @@
     team_activations: (t) => t.select('*').order('created_at', { ascending: false }).limit(10)
   };
   const attSince = () => isoDay(new Date(Date.now() - 200 * 864e5));
-  const OPTIONAL_TABLES = new Set(['sop_categories', 'teams', 'team_activations', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
+  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
 
   function loadCachedData() {
     for (const t of Object.keys(QUERIES)) {
@@ -1233,12 +1234,13 @@
   }
 
   // Admins: name, color and order the tabs.
-  function editSopTabs() {
-    const rows = sopTabs().map((t) => ({ id: t.id || null, name: t.name, color: t.color, k: Math.random().toString(36).slice(2) }));
+  // Shared tab editor (SOP tabs, Contact tabs): name, color and order.
+  function tabEditor({ title, intro, tabs, countOf, itemWord, rpc, onSaved }) {
+    const rows = tabs.map((t) => ({ id: t.id || null, name: t.name, color: t.color, k: Math.random().toString(36).slice(2) }));
     const list = h('div', { class: 'tab-editor' });
     const draw = () => {
       list.replaceChildren(...rows.map((r, i) => {
-        const n = state.data.sops.filter((s) => s.category === r.name && r.id).length;
+        const n = r.id ? countOf(r.name) : 0;
         const name = h('input', { type: 'text', class: 'input', value: r.name, maxlength: 40, placeholder: 'Tab name', 'aria-label': 'Tab name', id: 'te_' + r.k });
         name.addEventListener('input', () => { r.name = name.value; });
         const palette = h('div', { class: 'te-palette' + (r.open ? '' : ' hidden'), role: 'group', 'aria-label': 'Tab color' },
@@ -1258,7 +1260,7 @@
               type: 'button', class: 'icon-btn mini', 'aria-label': 'Remove tab', onclick: () => {
                 if (rows.length === 1) { toast('Keep at least one tab.'); return; }
                 const dest = rows.find((x) => x !== r);
-                if (n && !confirm(`${n} SOP${n > 1 ? 's' : ''} in "${r.name}" will move to "${dest.name}" (the first tab) when you save. Remove the tab?`)) return;
+                if (n && !confirm(`${n} ${itemWord}${n > 1 ? 's' : ''} in "${r.name}" will move to "${dest.name}" (the first tab) when you save. Remove the tab?`)) return;
                 rows.splice(i, 1); draw();
               }
             }, icon('x'))),
@@ -1267,9 +1269,9 @@
     };
     draw();
     openDialog({
-      title: 'Edit SOP tabs',
+      title,
       body: [
-        h('p', { class: 'muted small dlg-intro' }, 'Tabs show top to bottom in this order (0 is first). Tap the color dot to change a tab\'s color. Renaming a tab renames it on its SOPs.'),
+        h('p', { class: 'muted small dlg-intro' }, intro),
         list,
         h('button', { type: 'button', class: 'btn small', onclick: () => { const r = { id: null, name: '', color: 'gray', k: Math.random().toString(36).slice(2) }; rows.push(r); draw(); const el = document.getElementById('te_' + r.k); if (el) el.focus(); } }, '+ Add tab')
       ],
@@ -1281,15 +1283,10 @@
             const clean = rows.map((r) => ({ id: r.id, name: r.name.trim(), color: r.color }));
             if (clean.some((r) => !r.name)) { toast('Every tab needs a name.'); return; }
             btn.disabled = true;
-            const { error } = await sb.rpc('save_sop_categories', { p: clean });
+            const { error } = await sb.rpc(rpc, { p: clean });
             if (error) { toast(friendlyError(error), 6000); btn.disabled = false; return; }
-            // Stay on the same tab even if it was renamed (tabs are remembered by id).
-            const cur = currentSopTab();
-            if (!cur.id) { const same = clean.find((r) => r.name === cur.name && !r.id); if (!same) state.sopTab = null; }
             close();
-            await Promise.all([refreshTable('sop_categories'), refreshTable('sops')]);
-            if (!state.sopTab || !sopTabs().some((t) => tabKey(t) === state.sopTab)) state.sopTab = tabKey(sopTabs()[0]);
-            cacheSet('sopTab', state.sopTab);
+            await onSaved(clean);
             render();
             toast('Tabs saved');
           }
@@ -1297,6 +1294,23 @@
       ]
     });
   }
+  function editSopTabs() {
+    tabEditor({
+      title: 'Edit SOP tabs',
+      intro: 'Tabs show top to bottom in this order (0 is first). Tap the color dot to change a tab\'s color. Renaming a tab renames it on its SOPs.',
+      tabs: sopTabs(), itemWord: 'SOP', rpc: 'save_sop_categories',
+      countOf: (name) => state.data.sops.filter((s) => s.category === name).length,
+      onSaved: async (clean) => {
+        // Stay on the same tab even if it was renamed (tabs are remembered by id).
+        const cur = currentSopTab();
+        if (!cur.id) { const same = clean.find((r) => r.name === cur.name && !r.id); if (!same) state.sopTab = null; }
+        await Promise.all([refreshTable('sop_categories'), refreshTable('sops')]);
+        if (!state.sopTab || !sopTabs().some((t) => tabKey(t) === state.sopTab)) state.sopTab = tabKey(sopTabs()[0]);
+        cacheSet('sopTab', state.sopTab);
+      }
+    });
+  }
+
 
   function sopDetailView(id) {
     const s = state.data.sops.find((x) => x.id === id);
@@ -1408,59 +1422,181 @@
   // Opens the phone's own messaging app, addressed to this number.
   const textBtn = (phone) => h('a', { class: 'call-btn alt', href: smsHref(phone), 'aria-label': 'Text ' + phone }, icon('msg'), 'Text');
 
-  // Contacts = everyone on the active team roster (automatic) + other contacts admins add.
+  // Contacts: colored tabs down the side, like SOPs.
+  //   Security Team  everyone active on the roster (grouped by team when teams are set up)
+  //   Medical        roster members marked medical + contacts in a "Medical" category
+  //   then the contact categories, in the order and colors admins choose (Edit tabs).
+  // Search looks across all of them.
+  const MED_RE = /^medical$/i;
+  function contactTabs() {
+    const cats = state.data.contact_categories.slice().sort((a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
+    for (const n of categoriesOf(state.data.contacts)) if (!cats.some((c) => c.name === n)) cats.push({ name: n, color: 'gray', sort_order: 9999 });
+    const med = cats.find((c) => MED_RE.test(c.name));
+    return [
+      { key: 'team', name: 'Security Team', color: 'navy' },
+      { key: 'medical', name: 'Medical', color: med ? med.color : 'green', category: med ? med.name : null },
+      ...cats.filter((c) => !MED_RE.test(c.name)).map((c) => ({ key: 'cat:' + c.name, name: c.name, color: c.color, category: c.name, id: c.id }))
+    ];
+  }
+  const currentContactTab = () => { const tabs = contactTabs(); return tabs.find((t) => t.key === state.contactTab) || tabs[0]; };
+
+  function contactRow(c, showTab) {
+    const t = showTab && contactTabs().find((x) => x.category === c.category);
+    return h('div', { class: 'list-item contact-row' },
+      h('div', { class: 'grow' },
+        t ? h('span', { class: `sop-chip tc-${t.color}` }, t.name) : null,
+        h('div', { class: 'title' }, c.name),
+        c.organization ? h('div', { class: 'sub' }, c.organization) : null,
+        c.phone ? h('div', { class: 'sub' }, c.phone + (c.alt_phone ? ' · ' + c.alt_phone : '')) : null,
+        c.notes ? richText(c.notes, 'sub body-text') : null,
+        isAdmin() ? h('button', { class: 'btn small', onclick: () => editContact(c) }, 'Edit') : null),
+      h('div', { class: 'phones' },
+        c.phone ? callBtn(c.phone) : null,
+        c.phone ? textBtn(c.phone) : null,
+        c.alt_phone ? callBtn(c.alt_phone, true) : null));
+  }
+  function personRow(r, { showMedical = true, showTeam = false } = {}) {
+    const t = showTeam && teamOfPerson(r);
+    return h('div', { class: 'list-item team-contact' },
+      avatar(r),
+      h('button', { type: 'button', class: 'grow plain', onclick: () => openPerson(r) },
+        h('div', { class: 'title' }, r.name,
+          isLead(r) ? [' ', leadBadge()] : null,
+          showMedical && r.is_medical ? h('span', { class: 'badge medical inline' }, 'Medical') : null,
+          t ? [' ', teamChip(t)] : null),
+        r.is_medical && r.medical_notes && !showMedical ? h('div', { class: 'sub med-notes' }, r.medical_notes) : null,
+        r.position ? h('div', { class: 'sub' }, r.position) : null,
+        h('div', { class: 'sub' }, r.phone || 'No phone listed')),
+      h('div', { class: 'phones' }, r.phone ? callBtn(r.phone) : null, r.phone ? textBtn(r.phone) : null));
+  }
+  const byName = (a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name);
+
   function contactsView() {
-    const content = [];
-    const team = state.data.roster.filter((r) => r.active);
-    const rows = state.data.contacts;
-    if (!rows.length && !team.length) content.push(empty('No contacts yet', 'phone'));
-    for (const [cat, items] of groupBy(rows, 'category')) {
-      content.push(h('div', { class: 'section-title' }, cat));
-      content.push(h('div', { class: 'list' }, items.map((c) =>
-        h('div', { class: 'list-item' },
-          h('div', { class: 'grow' },
-            h('div', { class: 'title' }, c.name),
-            c.organization ? h('div', { class: 'sub' }, c.organization) : null,
-            c.phone ? h('div', { class: 'sub' }, c.phone + (c.alt_phone ? ' · ' + c.alt_phone : '')) : null,
-            c.notes ? richText(c.notes, 'sub body-text') : null,
-            isAdmin() ? h('button', { class: 'btn small', onclick: () => editContact(c) }, 'Edit') : null),
-          h('div', { class: 'phones' },
-            c.phone ? callBtn(c.phone) : null,
-            c.phone ? textBtn(c.phone) : null,
-            c.alt_phone ? callBtn(c.alt_phone, true) : null)))));
-    }
-    if (team.length) {
-      content.push(h('div', { class: 'section-title' }, `Security team (${team.length})`));
-      content.push(h('div', { class: 'list' }, team.map((r) =>
-        h('div', { class: 'list-item team-contact' },
-          avatar(r),
-          h('button', { type: 'button', class: 'grow plain', onclick: () => openPerson(r) },
-            h('div', { class: 'title' }, r.name,
-              r.is_medical ? h('span', { class: 'badge medical inline' }, 'Medical') : null),
-            r.position ? h('div', { class: 'sub' }, r.position) : null,
-            h('div', { class: 'sub' }, r.phone || 'No phone listed')),
-          h('div', { class: 'phones' }, r.phone ? callBtn(r.phone) : null, r.phone ? textBtn(r.phone) : null)))));
-      if (isAdmin()) content.push(h('p', { class: 'muted small' }, 'Team members come from the Team roster automatically. Edit them under Team.'));
-    }
-    return { title: 'Contacts', action: isAdmin() ? topAction('+ New', () => editContact()) : null, content };
+    const search = h('input', { class: 'search', type: 'search', placeholder: 'Search all contacts', 'aria-label': 'Search all contacts' });
+    search.value = state.contactQuery || '';
+    const wrap = h('div', {});
+    const draw = () => wrap.replaceChildren(contactRolodex(search, draw));
+    search.addEventListener('input', () => { state.contactQuery = search.value; draw(); });
+    draw();
+    return { title: 'Contacts', action: isAdmin() ? topAction('+ New', () => editContact(null, currentContactTab())) : null, content: [search, wrap] };
   }
 
-  function editContact(c) {
+  function contactRolodex(search, draw) {
+    const tabs = contactTabs();
+    const cur = currentContactTab();
+    const ql = (state.contactQuery || '').trim().toLowerCase();
+    const team = state.data.roster.filter((r) => r.active);
+    const count = (t) => t.key === 'team' ? team.length
+      : t.key === 'medical' ? team.filter((r) => r.is_medical).length + (t.category ? state.data.contacts.filter((c) => c.category === t.category).length : 0)
+        : state.data.contacts.filter((c) => c.category === t.category).length;
+
+    const rail = h('nav', { class: 'sop-rail', 'aria-label': 'Contact groups' }, tabs.map((t) => h('button', {
+      type: 'button',
+      class: `sop-tab tc-${t.color}` + (!ql && t.key === cur.key ? ' on' : ''),
+      'aria-pressed': !ql && t.key === cur.key ? 'true' : 'false',
+      title: `${t.name} (${count(t)})`,
+      onclick: () => {
+        state.contactTab = t.key;
+        cacheSet('contactTab', t.key);
+        if (state.contactQuery) { state.contactQuery = ''; search.value = ''; }
+        draw();
+      }
+    }, h('span', {}, t.name))));
+
+    let panel;
+    const head = (title, sub, color) => h('div', { class: 'sop-panel-head' }, h('h2', {}, title), h('span', { class: 'muted small' }, sub));
+    if (ql) {
+      const people = team.filter((r) => `${r.name} ${r.position} ${r.phone} ${r.email} ${r.medical_notes || ''} ${(teamOfPerson(r) || {}).name || ''}`.toLowerCase().includes(ql)).sort(byName);
+      const others = state.data.contacts.filter((c) => `${c.name} ${c.organization} ${c.category} ${c.phone} ${c.alt_phone} ${plainText(c.notes)}`.toLowerCase().includes(ql)).sort(byName);
+      const n = people.length + others.length;
+      panel = h('section', { class: 'sop-panel tc-search' }, head('Search results', `${n} found`),
+        n ? h('div', { class: 'list flat' }, people.map((r) => personRow(r, { showTeam: true })), others.map((c) => contactRow(c, true)))
+          : h('div', { class: 'sop-empty' }, 'No contacts match your search.'));
+    } else if (cur.key === 'team') {
+      const body = [];
+      if (teamsOn()) {
+        for (const t of teamsSorted()) {
+          const ppl = team.filter((r) => r.team_id === t.id).sort((a, b) => (b.id === t.lead_roster_id) - (a.id === t.lead_roster_id) || byName(a, b));
+          if (!ppl.length) continue;
+          body.push(h('div', { class: `contact-sub tc-${t.color}` }, `${t.name} Team`), ...ppl.map((r) => personRow(r)));
+        }
+        const none = team.filter((r) => !teamById(r.team_id)).sort(byName);
+        if (none.length) body.push(h('div', { class: 'contact-sub tc-gray' }, 'Not on a team'), ...none.map((r) => personRow(r)));
+      } else body.push(...team.slice().sort(byName).map((r) => personRow(r)));
+      panel = h('section', { class: `sop-panel tc-${cur.color}` }, head('Security Team', `${team.length} people`),
+        team.length ? h('div', { class: 'list flat' }, body) : h('div', { class: 'sop-empty' }, 'No team members yet.'),
+        isAdmin() ? h('div', { class: 'sop-panel-foot' }, h('span', { class: 'muted small grow' }, 'From the Team roster. Edit people under Team.'), h('button', { class: 'btn small', onclick: editContactTabs }, 'Edit tabs')) : null);
+    } else if (cur.key === 'medical') {
+      const meds = team.filter((r) => r.is_medical).sort(byName);
+      const others = cur.category ? state.data.contacts.filter((c) => c.category === cur.category).sort(byName) : [];
+      panel = h('section', { class: `sop-panel tc-${cur.color}` }, head('Medical', `${meds.length + others.length}`),
+        meds.length ? [h('div', { class: 'contact-sub' }, 'Medical team members'), h('div', { class: 'list flat' }, meds.map((r) => personRow(r, { showMedical: false, showTeam: true })))] : null,
+        others.length ? [h('div', { class: 'contact-sub' }, 'Other medical contacts'), h('div', { class: 'list flat' }, others.map((c) => contactRow(c)))] : null,
+        !meds.length && !others.length ? h('div', { class: 'sop-empty' }, isAdmin() ? 'Nobody yet. Mark people as "Medical point of contact" under Team, or add contacts to a "Medical" tab.' : 'No medical contacts listed yet.') : null,
+        isAdmin() ? h('div', { class: 'sop-panel-foot' }, h('button', { class: 'btn small', onclick: editContactTabs }, 'Edit tabs')) : null);
+    } else {
+      const rows = state.data.contacts.filter((c) => c.category === cur.category).sort(byName);
+      panel = h('section', { class: `sop-panel tc-${cur.color}` }, head(cur.name, rows.length === 1 ? '1 contact' : `${rows.length} contacts`),
+        rows.length ? h('div', { class: 'list flat' }, rows.map((c) => contactRow(c))) : h('div', { class: 'sop-empty' }, `No contacts in ${cur.name} yet.`),
+        isAdmin() ? h('div', { class: 'sop-panel-foot' }, h('button', { class: 'btn small', onclick: editContactTabs }, 'Edit tabs')) : null);
+    }
+    return h('div', { class: 'rolodex' }, panel, rail);
+  }
+
+  function editContactTabs() {
+    const cats = contactTabs().filter((t) => t.key !== 'team' && (t.key !== 'medical' || t.category));
+    tabEditor({
+      title: 'Edit contact tabs',
+      intro: 'Security Team and Medical are always first: they list the Team roster (Medical = people marked as a medical point of contact). A tab named "Medical" adds its contacts to the Medical tab and sets its color. Tap the color dot to change a color; renaming a tab renames it on its contacts.',
+      tabs: cats.length ? cats.map((t) => ({ id: t.id || (state.data.contact_categories.find((c) => c.name === t.category) || {}).id || null, name: t.category, color: t.color }))
+        : [{ id: null, name: 'General', color: 'gray' }],
+      itemWord: 'contact', rpc: 'save_contact_categories',
+      countOf: (name) => state.data.contacts.filter((c) => c.category === name).length,
+      onSaved: async () => {
+        await Promise.all([refreshTable('contact_categories'), refreshTable('contacts')]);
+        if (!contactTabs().some((t) => t.key === state.contactTab)) { state.contactTab = 'team'; cacheSet('contactTab', 'team'); }
+      }
+    });
+  }
+
+  function editContact(c, fromTab) {
     const isNew = !c;
     c = c || {};
+    const cats = contactTabs().filter((t) => t.category).map((t) => t.category);
+    const startCat = c.category || (fromTab && fromTab.category) || (fromTab && fromTab.key === 'medical' ? 'Medical' : '') || cats[0] || 'General';
+    const opts = [...new Set([...cats, startCat])].map((n) => [n, n]);
     openForm({
       title: isNew ? 'New contact' : 'Edit contact',
-      values: c,
+      values: { ...c, category: startCat },
       fields: [
         { name: 'name', label: 'Name', required: true, placeholder: 'e.g. Police (non-emergency)' },
         { name: 'organization', label: 'Organization / role' },
-        { name: 'category', label: 'Category', required: true, default: 'General', list: categoriesOf(state.data.contacts), hint: 'e.g. Emergency services, Church staff, Utilities. Security team members are listed automatically from the roster, so there is no need to add them here.' },
+        { name: 'category', label: 'Tab', type: 'select', options: [...opts, ['__new', '+ New tab…']],
+          hint: isNew ? 'Starts in the tab you were looking at. Security team members are listed automatically from the roster, so there is no need to add them here.' : null },
+        { name: 'new_category', label: 'New tab name', placeholder: 'e.g. Church staff, Utilities', visible: (v) => v.category === '__new' },
         { name: 'phone', label: 'Phone', type: 'tel', autocomplete: 'tel', inputmode: 'tel' },
         { name: 'alt_phone', label: 'Alternate phone', type: 'tel', inputmode: 'tel' },
         { name: 'notes', label: 'Notes', type: 'textarea', rows: 3 },
         { name: 'sort_order', label: 'Sort order', type: 'number', default: 0, inputmode: 'numeric' }
       ],
-      onSubmit: async (v) => { await saveRow('contacts', c.id, v); await afterSave('contacts', 'Contact saved'); },
+      onSubmit: async (v) => {
+        if (v.category === '__new') {
+          const name = (v.new_category || '').trim();
+          if (!name) throw new Error('Give the new tab a name.');
+          if (/^(security team|all)$/i.test(name)) throw new Error(`"${name}" is a built-in tab. Pick another name.`);
+          if (!state.data.contact_categories.some((x) => x.name.toLowerCase() === name.toLowerCase())) {
+            const { error } = await sb.from('contact_categories').insert({ name, color: 'gray', sort_order: state.data.contact_categories.length });
+            if (error && !/duplicate key/i.test(error.message || '')) throw error;
+          }
+          v.category = state.data.contact_categories.find((x) => x.name.toLowerCase() === name.toLowerCase())?.name || name;
+        }
+        delete v.new_category;
+        await saveRow('contacts', c.id, v);
+        await refreshTable('contact_categories');
+        const t = contactTabs().find((x) => x.category === v.category);
+        if (t) { state.contactTab = t.key; cacheSet('contactTab', t.key); }
+        await afterSave('contacts', 'Contact saved');
+      },
       onDelete: isNew ? null : async () => { await deleteRow('contacts', c.id); await afterSave('contacts', 'Contact deleted'); }
     });
   }
@@ -4252,6 +4388,7 @@
     state.lastSeenAlerts = Number(cacheGet('lastSeenAlerts')) || 0;
     state.lastSeenBoard = Number(cacheGet('lastSeenBoard')) || 0;
     state.sopTab = cacheGet('sopTab');
+    state.contactTab = cacheGet('contactTab');
     if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', (e) => {
       if (e.data && e.data.type === 'open' && e.data.hash) location.hash = e.data.hash;
       // The offline helper asks which version is running (old versions can't answer and get reloaded).
