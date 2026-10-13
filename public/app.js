@@ -1418,9 +1418,23 @@
   // ------------------------------------------------------------------
   // Contacts
   // ------------------------------------------------------------------
-  const callBtn = (phone, alt) => h('a', { class: 'call-btn' + (alt ? ' alt' : ''), href: telHref(phone) }, icon('phone'), alt ? 'Alt' : 'Call');
+  // One standard round button for each way to reach someone: Call (phone
+  // receiver), Text (message bubble), Email (envelope). Same size and shape
+  // everywhere; the label is read out by screen readers and shown on hover.
+  function contactBtn(kind, href, label, tag) {
+    return h('a', { class: `cbtn cbtn-${kind}`, href, 'aria-label': label, title: label },
+      icon({ call: 'phone', text: 'msg', email: 'mail' }[kind]), tag ? h('span', { class: 'cbtn-tag', 'aria-hidden': 'true' }, tag) : null);
+  }
+  const callBtn = (phone, alt, who) => contactBtn('call', telHref(phone), `${alt ? 'Call alternate number' : 'Call'}${who ? ' ' + who : ''} (${phone})`, alt ? '2' : null);
   // Opens the phone's own messaging app, addressed to this number.
-  const textBtn = (phone) => h('a', { class: 'call-btn alt', href: smsHref(phone), 'aria-label': 'Text ' + phone }, icon('msg'), 'Text');
+  const textBtn = (phone, who) => contactBtn('text', smsHref(phone), `Text${who ? ' ' + who : ''} (${phone})`);
+  const emailBtn = (email, who) => contactBtn('email', 'mailto:' + email, `Email${who ? ' ' + who : ''} (${email})`);
+  // The row of buttons for one person or contact.
+  const reachBtns = ({ phone, alt_phone, email, name }) => {
+    const btns = [phone ? callBtn(phone, false, name) : null, phone ? textBtn(phone, name) : null,
+      alt_phone ? callBtn(alt_phone, true, name) : null, validEmail(email) ? emailBtn(email, name) : null].filter(Boolean);
+    return btns.length ? h('div', { class: 'cbtns' }, btns) : null;
+  };
 
   // Contacts: colored tabs down the side, like SOPs.
   //   Security Team  everyone active on the roster (grouped by team when teams are set up)
@@ -1450,10 +1464,7 @@
         c.phone ? h('div', { class: 'sub' }, c.phone + (c.alt_phone ? ' · ' + c.alt_phone : '')) : null,
         c.notes ? richText(c.notes, 'sub body-text') : null,
         isAdmin() ? h('button', { class: 'btn small', onclick: () => editContact(c) }, 'Edit') : null),
-      h('div', { class: 'phones' },
-        c.phone ? callBtn(c.phone) : null,
-        c.phone ? textBtn(c.phone) : null,
-        c.alt_phone ? callBtn(c.alt_phone, true) : null));
+      reachBtns({ phone: c.phone, alt_phone: c.alt_phone, name: c.name }));
   }
   function personRow(r, { showMedical = true, showTeam = false } = {}) {
     const t = showTeam && teamOfPerson(r);
@@ -1467,7 +1478,7 @@
         r.is_medical && r.medical_notes && !showMedical ? h('div', { class: 'sub med-notes' }, r.medical_notes) : null,
         r.position ? h('div', { class: 'sub' }, r.position) : null,
         h('div', { class: 'sub' }, r.phone || 'No phone listed')),
-      h('div', { class: 'phones' }, r.phone ? callBtn(r.phone) : null, r.phone ? textBtn(r.phone) : null));
+      reachBtns({ phone: r.phone, name: r.name }));
   }
   const byName = (a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name);
 
@@ -1690,10 +1701,7 @@
           h('div', { class: 'body-text' }, c.detail)) : null,
         p.phone ? h('div', { class: 'meta' }, p.phone) : null,
         p.email ? h('div', { class: 'meta' }, p.email) : null,
-        h('div', { class: 'actions' },
-          p.phone ? h('a', { class: 'call-btn', href: telHref(p.phone) }, icon('phone'), 'Call') : null,
-          p.phone ? h('a', { class: 'call-btn alt', href: smsHref(p.phone) }, icon('msg'), 'Text') : null,
-          validEmail(p.email) ? h('a', { class: 'call-btn alt', href: 'mailto:' + p.email }, icon('mail'), 'Email') : null)
+        reachBtns({ phone: p.phone, email: p.email, name: p.name })
       ],
       buttons: isAdmin() ? (close) => [h('button', { class: 'btn', onclick: () => { close(); editPerson(p); } }, 'Edit')] : null
     });
@@ -1772,7 +1780,7 @@
   const myTeam = () => teamOfPerson(myRoster());
   const teamChip = (t, extra) => t ? h('span', { class: `badge team-badge tc-${t.color}` }, t.name + (extra || '')) : null;
   const leadBadge = () => h('span', { class: 'badge lead-badge', title: 'Team Lead' }, '★ Lead');
-  const callLink = (r, label) => r && r.phone ? h('a', { class: 'call-btn small-call', href: telHref(r.phone) }, icon('phone'), label || 'Call') : null;
+  const callLink = (r) => r && r.phone ? h('div', { class: 'cbtns' }, callBtn(r.phone, false, r.name), textBtn(r.phone, r.name)) : null;
 
   // A team's details: lead, rally point, procedure. Used on the Team tab, More and the activation screen.
   function teamDetails(t, { showMembers = false } = {}) {
