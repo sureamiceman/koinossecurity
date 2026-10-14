@@ -1221,7 +1221,6 @@
     ['attendance', 'Count', 'clipboard'],
     ['sops', 'SOPs', 'book'],
     ['contacts', 'Contacts', 'phone'],
-    ['team', 'Team', 'users'],
     ['more', 'More', 'menu']
   ];
   function route() {
@@ -1238,10 +1237,14 @@
     let [tab, id, sub] = route();
     if ((tab === 'users' || tab === 'assignments') && !isAdmin()) tab = 'more';
     if (tab === 'attendance-setup' && !isAdmin()) tab = 'attendance';
-    if (tab === 'teams' && !isAdmin()) tab = 'team';
-    const views = { alerts: alertsView, schedule: scheduleView, confirm: confirmView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, team: teamView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView, teams: teamsAdminView, activation: activationView };
+    if (tab === 'teams' && !isAdmin()) tab = 'contacts';
+    if (tab === 'team') {   // the old Team tab: now Contacts → Security Team
+      tab = 'contacts'; state.contactTab = 'team'; state.contactQuery = '';
+      history.replaceState(null, '', '#/contacts');
+    }
+    const views = { alerts: alertsView, schedule: scheduleView, confirm: confirmView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView, teams: teamsAdminView, activation: activationView };
     const v = (views[tab] || alertsView)(id, sub);
-    const activeTab = tab === 'users' ? 'more' : (tab === 'assignments' || tab === 'confirm') ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : tab === 'teams' ? 'team' : tab === 'activation' ? 'alerts' : (views[tab] ? tab : 'alerts');
+    const activeTab = tab === 'users' ? 'more' : (tab === 'assignments' || tab === 'confirm') ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : tab === 'teams' ? 'contacts' : tab === 'activation' ? 'alerts' : (views[tab] ? tab : 'alerts');
 
     if (activeTab === 'alerts') {
       state.lastSeenAlerts = Date.now();
@@ -1716,17 +1719,22 @@
         c.organization ? h('div', { class: 'sub' }, c.organization) : null,
         c.phone ? h('div', { class: 'sub' }, c.phone + (c.alt_phone ? ' · ' + c.alt_phone : '')) : null,
         c.notes ? richText(c.notes, 'sub body-text') : null,
+        isAdmin() && rosterTwin(c) ? h('div', { class: 'notice twin' }, `Looks like ${rosterTwin(c).name} from the Security Team.`,
+          h('button', { class: 'btn small', onclick: () => mergeContact(c, rosterTwin(c)) }, 'Merge')) : null,
         isAdmin() ? h('button', { class: 'btn small', onclick: () => editContact(c) }, 'Edit') : null),
       reachBtns({ phone: c.phone, alt_phone: c.alt_phone, name: c.name }));
   }
-  function personRow(r, { showMedical = true, showTeam = false } = {}) {
+  function personRow(r, { showMedical = true, showTeam = false, showCcw = false } = {}) {
     const t = showTeam && teamOfPerson(r);
-    return h('div', { class: 'list-item team-contact' },
+    const c = showCcw && ccwStatus(r);
+    return h('div', { class: 'list-item team-contact' + (r.active ? '' : ' inactive') },
       avatar(r),
       h('button', { type: 'button', class: 'grow plain', onclick: () => openPerson(r) },
         h('div', { class: 'title' }, r.name,
           isLead(r) ? [' ', leadBadge()] : null,
           showMedical && r.is_medical ? h('span', { class: 'badge medical inline' }, 'Medical') : null,
+          c ? h('span', { class: 'badge inline ' + c.cls }, c.label) : null,
+          !r.active ? h('span', { class: 'badge inline muted-badge' }, 'Inactive') : null,
           t ? [' ', teamChip(t)] : null),
         r.is_medical && r.medical_notes && !showMedical ? h('div', { class: 'sub med-notes' }, r.medical_notes) : null,
         r.position ? h('div', { class: 'sub' }, r.position) : null,
@@ -1742,7 +1750,9 @@
     const draw = () => wrap.replaceChildren(contactRolodex(search, draw));
     search.addEventListener('input', () => { state.contactQuery = search.value; draw(); });
     draw();
-    return { title: 'Contacts', action: isAdmin() ? topAction('+ New', () => editContact(null, currentContactTab())) : null, content: [search, wrap] };
+    const cur = currentContactTab();
+    const add = cur.key === 'team' ? () => editPerson() : cur.key === 'medical' ? addMedical : () => editContact(null, cur);
+    return { title: 'Contacts', action: isAdmin() ? topAction('+ New', add) : null, content: [search, wrap] };
   }
 
   function contactRolodex(search, draw) {
@@ -1762,8 +1772,8 @@
       onclick: () => {
         state.contactTab = t.key;
         cacheSet('contactTab', t.key);
-        if (state.contactQuery) { state.contactQuery = ''; search.value = ''; }
-        draw();
+        if (state.contactQuery) state.contactQuery = '';
+        render();   // the top "+ New" depends on the tab
       }
     }, h('span', {}, t.name))));
 
@@ -1777,26 +1787,15 @@
         n ? h('div', { class: 'list flat' }, people.map((r) => personRow(r, { showTeam: true })), others.map((c) => contactRow(c, true)))
           : h('div', { class: 'sop-empty' }, 'No contacts match your search.'));
     } else if (cur.key === 'team') {
-      const body = [];
-      if (teamsOn()) {
-        for (const t of teamsSorted()) {
-          const ppl = team.filter((r) => r.team_id === t.id).sort((a, b) => (b.id === t.lead_roster_id) - (a.id === t.lead_roster_id) || byName(a, b));
-          if (!ppl.length) continue;
-          body.push(h('div', { class: `contact-sub tc-${t.color}` }, `${t.name} Team`), ...ppl.map((r) => personRow(r)));
-        }
-        const none = team.filter((r) => !teamById(r.team_id)).sort(byName);
-        if (none.length) body.push(h('div', { class: 'contact-sub tc-gray' }, 'Not on a team'), ...none.map((r) => personRow(r)));
-      } else body.push(...team.slice().sort(byName).map((r) => personRow(r)));
-      panel = h('section', { class: `sop-panel tc-${cur.color}` }, head('Security Team', `${team.length} people`),
-        team.length ? h('div', { class: 'list flat' }, body) : h('div', { class: 'sop-empty' }, 'No team members yet.'),
-        isAdmin() ? h('div', { class: 'sop-panel-foot' }, h('span', { class: 'muted small grow' }, 'From the Team roster. Edit people under Team.'), h('button', { class: 'btn small', onclick: editContactTabs }, 'Edit tabs')) : null);
+      panel = h('section', { class: `sop-panel tc-${cur.color}` }, securityTeamPanel(cur), 
+        isAdmin() ? h('div', { class: 'sop-panel-foot' }, h('button', { class: 'btn small', onclick: editContactTabs }, 'Edit tabs')) : null);
     } else if (cur.key === 'medical') {
       const meds = team.filter((r) => r.is_medical).sort(byName);
       const others = cur.category ? state.data.contacts.filter((c) => c.category === cur.category).sort(byName) : [];
       panel = h('section', { class: `sop-panel tc-${cur.color}` }, head('Medical', `${meds.length + others.length}`),
-        meds.length ? [h('div', { class: 'contact-sub' }, 'Medical team members'), h('div', { class: 'list flat' }, meds.map((r) => personRow(r, { showMedical: false, showTeam: true })))] : null,
-        others.length ? [h('div', { class: 'contact-sub' }, 'Other medical contacts'), h('div', { class: 'list flat' }, others.map((c) => contactRow(c)))] : null,
-        !meds.length && !others.length ? h('div', { class: 'sop-empty' }, isAdmin() ? 'Nobody yet. Mark people as "Medical point of contact" under Team, or add contacts to a "Medical" tab.' : 'No medical contacts listed yet.') : null,
+        meds.length ? [h('div', { class: 'contact-sub' }, 'Security Team members'), h('div', { class: 'list flat' }, meds.map((r) => personRow(r, { showMedical: false, showTeam: true })))] : null,
+        others.length ? [h('div', { class: 'contact-sub' }, 'Outside medical contacts'), h('div', { class: 'list flat' }, others.map((c) => contactRow(c)))] : null,
+        !meds.length && !others.length ? h('div', { class: 'sop-empty' }, isAdmin() ? 'Nobody yet. Tap + New to add a Security Team member or an outside contact.' : 'No medical contacts listed yet.') : null,
         isAdmin() ? h('div', { class: 'sop-panel-foot' }, h('button', { class: 'btn small', onclick: editContactTabs }, 'Edit tabs')) : null);
     } else {
       const rows = state.data.contacts.filter((c) => c.category === cur.category).sort(byName);
@@ -1811,7 +1810,7 @@
     const cats = contactTabs().filter((t) => t.key !== 'team' && (t.key !== 'medical' || t.category));
     tabEditor({
       title: 'Edit contact tabs',
-      intro: 'Security Team and Medical are always first: they list the Team roster (Medical = people marked as a medical point of contact). A tab named "Medical" adds its contacts to the Medical tab and sets its color. Tap the color dot to change a color; renaming a tab renames it on its contacts.',
+      intro: 'Security Team and Medical are always first. Medical lists Security Team members marked "Show on the Medical tab" plus outside contacts in a tab named "Medical" (which also sets its color). Tap the color dot to change a color; renaming a tab renames it on its contacts.',
       tabs: cats.length ? cats.map((t) => ({ id: t.id || (state.data.contact_categories.find((c) => c.name === t.category) || {}).id || null, name: t.category, color: t.color }))
         : [{ id: null, name: 'General', color: 'gray' }],
       itemWord: 'contact', rpc: 'save_contact_categories',
@@ -1836,7 +1835,7 @@
         { name: 'name', label: 'Name', required: true, placeholder: 'e.g. Police (non-emergency)' },
         { name: 'organization', label: 'Organization / role' },
         { name: 'category', label: 'Tab', type: 'select', options: [...opts, ['__new', '+ New tab…']],
-          hint: isNew ? 'Starts in the tab you were looking at. Security team members are listed automatically from the roster, so there is no need to add them here.' : null },
+          hint: isNew ? 'For people outside the security team. Security Team members are added under Security Team (and put on Medical with their "Show on the Medical tab" box), so they are never listed twice.' : null },
         { name: 'new_category', label: 'New tab name', placeholder: 'e.g. Church staff, Utilities', visible: (v) => v.category === '__new' },
         { name: 'phone', label: 'Phone', type: 'tel', autocomplete: 'tel', inputmode: 'tel' },
         { name: 'alt_phone', label: 'Alternate phone', type: 'tel', inputmode: 'tel' },
@@ -1887,53 +1886,89 @@
     return { cls: 'ccw', label: 'CCW', detail: `Qualified through ${fmtDay(p.ccw_expires_on)}` };
   }
 
-  function teamView() {
+  // Contacts → Security Team: everything the old Team tab had.
+  function securityTeamPanel() {
     const all = state.data.roster.filter((p) => p.active || isAdmin());
     const medical = all.filter((p) => p.is_medical);
     const ccw = all.filter((p) => p.ccw_qualified)
       .sort((a, b) => (a.ccw_expires_on || '0000') < (b.ccw_expires_on || '0000') ? -1 : 1);
     if (!state.teamFilter) state.teamFilter = teamsOn() ? 'teams' : 'all';
     if (state.teamFilter === 'teams' && !teamsOn()) state.teamFilter = 'all';
-    const showing = state.teamFilter === 'medical' ? medical : state.teamFilter === 'ccw' ? ccw : all;
-    const chip = (key, label) => h('button', { class: 'chip' + (state.teamFilter === key ? ' on' : ''), onclick: () => { state.teamFilter = key; render(); } }, label);
-    const content = [h('div', { class: 'chips' },
-      teamsOn() ? chip('teams', 'By team') : null,
-      chip('all', `Everyone (${all.length})`), chip('medical', `Medical (${medical.length})`), chip('ccw', `CCW (${ccw.length})`))];
-
+    const showing = (state.teamFilter === 'medical' ? medical : state.teamFilter === 'ccw' ? ccw : all.slice().sort(byName));
+    const chip = (key, label) => h('button', { type: 'button', class: 'chip' + (state.teamFilter === key ? ' on' : ''), onclick: () => { state.teamFilter = key; render(); } }, label);
+    const out = [h('div', { class: 'sop-panel-head' }, h('h2', {}, 'Security Team'), h('span', { class: 'muted small' }, `${all.filter((p) => p.active).length} people`)),
+      h('div', { class: 'chips team-chips' },
+        teamsOn() ? chip('teams', 'By team') : null,
+        chip('all', `Everyone`), chip('medical', `Medical (${medical.length})`), chip('ccw', `CCW (${ccw.length})`))];
     const problems = ccw.filter((p) => p.active && ccwStatus(p).problem);
     if (isAdmin() && problems.length) {
-      content.push(h('button', { class: 'notice block-btn', onclick: () => { state.teamFilter = 'ccw'; render(); } },
+      out.push(h('button', { class: 'notice block-btn', onclick: () => { state.teamFilter = 'ccw'; render(); } },
         `${problems.length} CCW qualification${problems.length > 1 ? 's' : ''} expired, expiring within ${CCW_WARN_DAYS} days, or missing a date: `,
         problems.map((p) => p.name).join(', ')));
     }
-    if (state.teamFilter === 'teams') {
-      if (isAdmin()) content.push(h('div', { class: 'actions team-tools' }, h('a', { class: 'btn small', href: '#/teams' }, 'Manage teams'), h('a', { class: 'btn small', href: '#/activation' }, 'Team activation')));
-      content.push(...teamSections(all));
-    } else if (!showing.length) content.push(empty(
-      state.teamFilter === 'medical' ? 'No medical points of contact listed'
-        : state.teamFilter === 'ccw' ? 'No CCW-qualified team members listed' : 'No team members listed yet', 'users'));
-    else content.push(h('div', { class: 'roster-grid' }, showing.map(personCard)));
-    return { title: 'Team', action: isAdmin() ? topAction('+ New', () => editPerson()) : null, content };
+    if (isAdmin()) out.push(h('div', { class: 'actions team-tools' },
+      h('button', { class: 'btn small', onclick: () => editPerson() }, '+ Add team member'),
+      teamsOn() || isAdmin() ? h('a', { class: 'btn small', href: '#/teams' }, 'Manage teams') : null,
+      teamsOn() ? h('a', { class: 'btn small', href: '#/activation' }, 'Team activation') : null));
+    if (state.teamFilter === 'teams') out.push(...teamSections(all));
+    else if (!showing.length) out.push(h('div', { class: 'sop-empty' },
+      state.teamFilter === 'medical' ? 'Nobody is marked "Show on the Medical tab" yet.'
+        : state.teamFilter === 'ccw' ? 'No CCW-qualified team members listed.' : 'No team members yet.'));
+    else out.push(h('div', { class: 'list flat' }, showing.map((r) => personRow(r, { showTeam: true, showCcw: true }))));
+    return out;
+  }
+
+  // Same person as a Security Team member? (same phone number, or same name)
+  const digits = (x) => String(x || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+  const normName = (x) => String(x || '').toLowerCase().replace(/[^a-z]/g, '');
+  function rosterTwin(c) {
+    const phones = [digits(c.phone), digits(c.alt_phone)].filter((d) => d.length >= 7);
+    return state.data.roster.find((r) => (r.phone && phones.includes(digits(r.phone))) || (normName(r.name) && normName(r.name) === normName(c.name))) || null;
+  }
+  async function mergeContact(c, r) {
+    const med = MED_RE.test(c.category || '');
+    const what = [`Keep ${r.name} on the Security Team and delete the separate contact "${c.name}".`,
+      !r.phone && c.phone ? `Their phone number becomes ${c.phone}.` : '',
+      med ? 'They will be marked "Show on the Medical tab".' : ''].filter(Boolean).join(' ');
+    if (!confirm(what + '\n\nMerge?')) return;
+    try {
+      const row = {};
+      if (!r.phone && (c.phone || c.alt_phone)) row.phone = c.phone || c.alt_phone;
+      if (med) {
+        row.is_medical = true;
+        if (!r.medical_notes) row.medical_notes = [c.organization, plainText(c.notes)].filter(Boolean).join(' · ').slice(0, 200) || null;
+      }
+      if (Object.keys(row).length) await saveRow('roster', r.id, row);
+      await deleteRow('contacts', c.id);
+      await refreshTable('roster');
+      await afterSave('contacts', `Merged into ${r.name}`);
+    } catch (e) { toast(friendlyError(e), 5000); }
+  }
+
+  // Medical → + New: a Security Team member (just marks them) or an outside contact.
+  function addMedical() {
+    const people = state.data.roster.filter((r) => r.active && !r.is_medical).sort((a, b) => a.name.localeCompare(b.name));
+    openForm({
+      title: 'Add to Medical',
+      fields: [
+        { name: 'kind', label: 'Who is it?', type: 'select', options: [['team', 'A Security Team member'], ['outside', 'Someone outside the security team']] },
+        { name: 'roster_id', label: 'Team member', type: 'select', options: people.length ? people.map((r) => [r.id, r.name]) : [['', 'Everyone on the team is already on Medical']], visible: (v) => v.kind === 'team' },
+        { name: 'medical_notes', label: 'Medical qualifications', placeholder: 'e.g. RN, EMT, CPR/AED certified', visible: (v) => v.kind === 'team' },
+        { name: 'note', type: 'custom', label: '', visible: (v) => v.kind === 'outside', build: (box) => { box.append(h('p', { class: 'muted small' }, 'Next you\'ll fill in their name and phone number.')); return { get: () => '' }; } }
+      ],
+      submitLabel: 'Continue',
+      onSubmit: async (v) => {
+        if (v.kind === 'outside') { setTimeout(() => editContact(null, currentContactTab()), 0); return; }
+        if (!v.roster_id) throw new Error('Pick a team member.');
+        await saveRow('roster', v.roster_id, { is_medical: true, medical_notes: v.medical_notes || null });
+        await afterSave('roster', 'Added to Medical');
+      }
+    });
   }
 
   function personPhoto(p, cls) {
     const url = p.photo_path && state.photoUrls[p.photo_path];
     return url ? h('img', { class: cls || 'photo', src: url, alt: p.name, loading: 'lazy' }) : h('div', { class: 'initials' }, initials(p.name));
-  }
-
-  function personCard(p) {
-    const c = ccwStatus(p);
-    return h('button', { class: 'person' + (p.active ? '' : ' inactive'), onclick: () => openPerson(p) },
-      personPhoto(p),
-      h('div', { class: 'info' },
-        h('div', { class: 'name' }, p.name),
-        p.position ? h('div', { class: 'pos' }, p.position) : null,
-        h('div', { class: 'badges' },
-          state.teamFilter !== 'teams' ? teamChip(teamOfPerson(p)) : null,
-          isLead(p) ? leadBadge() : null,
-          p.is_medical ? h('span', { class: 'badge medical' }, 'Medical') : null,
-          c ? h('span', { class: 'badge ' + c.cls }, c.label) : null,
-          !p.active ? h('span', { class: 'badge muted-badge' }, 'Inactive') : null)));
   }
 
   function openPerson(p) {
@@ -1965,7 +2000,7 @@
     p = p || {};
     const accounts = state.data.profiles.filter((a) => a.role !== 'pending');
     openForm({
-      title: isNew ? 'Add team member' : 'Edit team member',
+      title: isNew ? 'Add Security Team member' : 'Edit Security Team member',
       values: { ...p, profile_id: p.profile_id || '', ccw_expires_on: p.ccw_expires_on || '', team_id: p.team_id || '' },
       fields: [
         { name: 'name', label: 'Name', required: true },
@@ -1977,8 +2012,8 @@
           options: [['', 'Not linked'], ...accounts.map((a) => [a.id, `${a.full_name || '(no name)'} — ${a.email}`])],
           hint: 'Link the person\'s sign-in so they can see "My assignments" and volunteer or swap. Left blank, it links automatically when the email matches.' },
         { name: 'photo', label: 'Photo', type: 'photo', currentUrl: p.photo_path ? state.photoUrls[p.photo_path] : null },
-        { name: 'is_medical', label: 'Medical point of contact', type: 'checkbox' },
-        { name: 'medical_notes', label: 'Medical qualifications', placeholder: 'e.g. RN, EMT, CPR/AED certified' },
+        { name: 'is_medical', label: 'Show on the Medical tab (medical point of contact)', type: 'checkbox' },
+        { name: 'medical_notes', label: 'Medical qualifications', placeholder: 'e.g. RN, EMT, CPR/AED certified', visible: (v) => v.is_medical, hint: 'Shown under their name on the Medical tab.' },
         { name: 'ccw_qualified', label: 'CCW qualified', type: 'checkbox' },
         { name: 'ccw_expires_on', label: 'CCW qualification expires', type: 'date', hint: `Admins are warned ${CCW_WARN_DAYS} days before it expires.` },
         { name: 'sort_order', label: 'Sort order', type: 'number', default: 0, inputmode: 'numeric' },
@@ -2063,12 +2098,12 @@
           h('span', { class: 'muted small' }, people.length === 1 ? '1 person' : `${people.length} people`),
           isAdmin() ? h('button', { class: 'btn small', onclick: () => editTeam(t) }, 'Edit') : null),
         teamDetails(t),
-        people.length ? h('div', { class: 'roster-grid' }, people.map(personCard)) : h('div', { class: 'muted small team-empty' }, isAdmin() ? 'Nobody on this team yet. Use Assign people below, or Edit a person.' : 'Nobody on this team yet.')));
+        people.length ? h('div', { class: 'list flat' }, people.map((r) => personRow(r, { showCcw: true }))) : h('div', { class: 'muted small team-empty' }, isAdmin() ? 'Nobody on this team yet. Use Assign people below, or Edit a person.' : 'Nobody on this team yet.')));
     }
     if (none.length) {
       out.push(h('section', { class: 'team-section tc-gray' },
         h('div', { class: 'team-head' }, h('h2', {}, 'Not on a team'), h('span', { class: 'muted small' }, `${none.length}`)),
-        h('div', { class: 'roster-grid' }, none.map(personCard))));
+        h('div', { class: 'list flat' }, none.map((r) => personRow(r, { showCcw: true })))));
     }
     return out;
   }
@@ -2105,7 +2140,7 @@
         h('div', { class: 'grow' }, h('div', { class: 'title' }, r.name, isLead(r) ? [' ', leadBadge()] : null), r.position ? h('div', { class: 'sub' }, r.position) : null),
         sel);
     })));
-    return { title: 'Manage teams', back: '#/team', content };
+    return { title: 'Manage teams', back: '#/contacts', content };
   }
 
   function editTeam(t) {
