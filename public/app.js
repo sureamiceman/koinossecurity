@@ -22,8 +22,7 @@
     auth: { step: 'signin', email: '', busy: false, error: '' },
     data: emptyData(),
     sched: { view: 'list', filter: 'upcoming', person: '', day: null, month: new Date() },
-    photoUrls: {},
-    photoUrlsAt: 0,
+    photoUrls: {},   // photo path → address of this device's saved copy
     showArchived: false,
     sopQuery: '',
     sopTab: null,
@@ -471,21 +470,65 @@
     const errors = results.filter(([t, e]) => e && !OPTIONAL_TABLES.has(t)).map(([, e]) => e);
     if (!errors.length) retryAttendanceEmails();
     if (!errors.length) await purgeBoard().catch(() => {});
-    await resolvePhotos();
+    await resolvePhotos({ prune: !errors.length });
     syncSopImages();
     render();
     if (errors.length) toast(navigator.onLine ? 'Could not refresh — showing saved information' : 'Offline — showing saved information');
     else if (showToast) toast('Up to date');
   }
 
-  async function resolvePhotos() {
-    if (Date.now() - state.photoUrlsAt > 6 * 3600 * 1000) { state.photoUrls = {}; state.photoUrlsAt = Date.now(); }
-    const paths = [...new Set([...state.data.bulletins, ...state.data.roster, ...state.data.profiles, state.profile || {}, ...state.data.posts, ...state.data.post_replies]
-      .map((r) => r.photo_path).filter((p) => p && !state.photoUrls[p]))];
-    if (!paths.length) return;
-    const { data, error } = await sb.storage.from('photos').createSignedUrls(paths, 12 * 3600);
-    if (error || !data) return;
-    for (const d of data) if (d.signedUrl && d.path) state.photoUrls[d.path] = d.signedUrl;
+  // Photos (roster, profiles, alerts, board) are downloaded once per phone and
+  // saved there (browser Cache Storage). A photo's path never changes (a new
+  // photo gets a new path), so the saved copy is always right. This keeps the
+  // Supabase download allowance tiny and makes photos work offline.
+  const PHOTO_CACHE = 'koinos-photos';
+  const photoKey = (path) => '/__photo/' + path;
+  async function openCache(name) { try { return window.caches ? await caches.open(name) : null; } catch { return null; } }
+  // Paths → { path: local address } for those found in the cache or downloaded now.
+  async function loadPhotoFiles(cacheName, paths) {
+    const out = {};
+    const cache = await openCache(cacheName);
+    const missing = [];
+    for (const p of paths) {
+      const hit = cache ? await cache.match(photoKey(p)).catch(() => null) : null;
+      if (hit) out[p] = URL.createObjectURL(await hit.blob()); else missing.push(p);
+    }
+    if (missing.length && navigator.onLine) {
+      const { data } = await sb.storage.from('photos').createSignedUrls(missing, 600).catch(() => ({ data: null }));
+      await Promise.all((data || []).map(async (d) => {
+        if (!d.signedUrl || !d.path) return;
+        try {
+          const res = await fetch(d.signedUrl);
+          if (!res.ok) return;
+          const blob = await res.blob();
+          if (cache) await cache.put(photoKey(d.path), new Response(blob, { headers: { 'Content-Type': blob.type || 'image/jpeg' } })).catch(() => {});
+          out[d.path] = URL.createObjectURL(blob);
+        } catch { /* try again next time */ }
+      }));
+    }
+    return out;
+  }
+  // Saved copies no longer used anywhere are removed (only when online and up to date).
+  async function pruneCache(cacheName, keep) {
+    const cache = await openCache(cacheName);
+    if (!cache || !navigator.onLine) return;
+    for (const req of await cache.keys().catch(() => [])) {
+      const path = new URL(req.url).pathname;
+      const p = path.startsWith('/__photo/') ? decodeURIComponent(path.slice(9)) : null;   // (older saved copies used another name)
+      if (!p || !keep.has(p)) cache.delete(req).catch(() => {});
+    }
+  }
+
+  const photoPaths = () => new Set([...state.data.bulletins, ...state.data.roster, ...state.data.profiles, state.profile || {}, ...state.data.posts, ...state.data.post_replies]
+    .map((r) => r.photo_path).filter(Boolean));
+  async function resolvePhotos({ prune = false } = {}) {
+    const want = photoPaths();
+    const missing = [...want].filter((p) => !state.photoUrls[p]);
+    if (missing.length) Object.assign(state.photoUrls, await loadPhotoFiles(PHOTO_CACHE, missing));
+    if (prune) {
+      for (const p of Object.keys(state.photoUrls)) if (!want.has(p)) { URL.revokeObjectURL(state.photoUrls[p]); delete state.photoUrls[p]; }
+      pruneCache(PHOTO_CACHE, want);
+    }
   }
 
   function subscribe() {
@@ -610,34 +653,10 @@
   const SOP_IMG_CACHE = 'koinos-sop-images';
   const sopImg = { urls: new Map(), keep: new Set(), running: null, again: false };
   const sopImagePaths = (html) => [...String(html || '').matchAll(/data-photo="(sops\/[A-Za-z0-9-]{1,64}\.(?:jpg|png|webp))"/g)].map((m) => m[1]);
-  const sopImgKey = (path) => '/__sop-image/' + path;
-  async function sopImgCache() { try { return window.caches ? await caches.open(SOP_IMG_CACHE) : null; } catch { return null; } }
-
-  // A picture's address on this device (from the saved copy, or downloaded and saved now).
   async function loadSopImages(paths) {
-    const cache = await sopImgCache();
-    const missing = [];
-    let added = false;
-    for (const p of paths) {
-      if (sopImg.urls.has(p)) continue;
-      const hit = cache ? await cache.match(sopImgKey(p)).catch(() => null) : null;
-      if (hit) { sopImg.urls.set(p, URL.createObjectURL(await hit.blob())); added = true; } else missing.push(p);
-    }
-    if (missing.length && navigator.onLine) {
-      const { data } = await sb.storage.from('photos').createSignedUrls(missing, 600).catch(() => ({ data: null }));
-      await Promise.all((data || []).map(async (d) => {
-        if (!d.signedUrl || !d.path) return;
-        try {
-          const res = await fetch(d.signedUrl);
-          if (!res.ok) return;
-          const blob = await res.blob();
-          if (cache) await cache.put(sopImgKey(d.path), new Response(blob, { headers: { 'Content-Type': blob.type || 'image/jpeg' } })).catch(() => {});
-          sopImg.urls.set(d.path, URL.createObjectURL(blob));
-          added = true;
-        } catch { /* try again next time */ }
-      }));
-    }
-    return added;
+    const got = await loadPhotoFiles(SOP_IMG_CACHE, paths.filter((p) => !sopImg.urls.has(p)));
+    for (const [p, u] of Object.entries(got)) sopImg.urls.set(p, u);
+    return Object.keys(got).length > 0;
   }
   async function sopImageUrl(path) {
     if (!sopImg.urls.has(path)) await loadSopImages([path]);
@@ -650,13 +669,7 @@
     sopImg.running = (async () => {
       const want = new Set(state.data.sops.filter((s) => s.format === 'html').flatMap((s) => sopImagePaths(s.body)));
       const added = await loadSopImages([...want]);
-      const cache = await sopImgCache();
-      if (cache && navigator.onLine) {
-        for (const req of await cache.keys().catch(() => [])) {
-          const p = decodeURIComponent(new URL(req.url).pathname.replace('/__sop-image/', ''));
-          if (!want.has(p) && !sopImg.keep.has(p)) cache.delete(req).catch(() => {});
-        }
-      }
+      pruneCache(SOP_IMG_CACHE, new Set([...want, ...sopImg.keep]));
       if (added) render();
     })().catch(() => {}).finally(() => {
       sopImg.running = null;
@@ -681,8 +694,8 @@
       if (error) throw error;
       sopImg.keep.add(path);
       sopImg.urls.set(path, URL.createObjectURL(blob));
-      const cache = await sopImgCache();
-      if (cache) cache.put(sopImgKey(path), new Response(blob, { headers: { 'Content-Type': 'image/jpeg' } })).catch(() => {});
+      const cache = await openCache(SOP_IMG_CACHE);
+      if (cache) cache.put(photoKey(path), new Response(blob, { headers: { 'Content-Type': 'image/jpeg' } })).catch(() => {});
       return path;
     } catch (e) {
       toast(navigator.onLine ? 'Could not add the picture: ' + friendlyError(e) : 'Pictures can only be added with a connection.', 5000);
@@ -1186,6 +1199,7 @@
       loadCachedData();
       render();
       syncSopImages();   // offline: show the saved pictures straight away
+      resolvePhotos().then(render, () => {});
       await refreshAll();
       subscribe();
       syncPush();
@@ -1204,9 +1218,11 @@
     state.profileError = null;
     state.profilePrompted = false;
     state.data = emptyData();
+    for (const u of Object.values(state.photoUrls)) URL.revokeObjectURL(u);
     state.photoUrls = {};
     state.sopTrail = [];
     forgetSopImages();
+    try { if (window.caches) caches.delete(PHOTO_CACHE); } catch { /* ignore */ }
     history.replaceState(null, '', '/');
     render();
   }
@@ -2742,7 +2758,7 @@
       ...(showRepeat ? [
         { name: 'repeat', label: 'Repeat', type: 'select', options: isSeriesEdit ? REPEAT_OPTIONS.slice(1) : REPEAT_OPTIONS },
         { name: 'weekdays', label: 'On these days', type: 'weekdays', visible: (v) => v.repeat === 'weekly' || v.repeat === 'biweekly' },
-        { name: 'until', label: 'End repeat (optional)', type: 'date', hint: 'Leave blank to keep repeating. Dates are filled in about 6 months ahead.', visible: repeats }
+        { name: 'until', label: 'End repeat (optional)', type: 'date', hint: 'Leave blank to keep repeating. Dates are filled in 6 whole months ahead, and a new month is added on the 1st of each month.', visible: repeats }
       ] : []),
       ...(showPosts ? [{
         name: 'posts', label: 'Posts', type: 'posts',
@@ -3438,7 +3454,7 @@
   function sundaysForWeek(w) {
     const out = [];
     const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + ((7 - d.getDay()) % 7));
-    const end = new Date(); end.setDate(end.getDate() + 182);
+    const end = new Date(); end.setMonth(end.getMonth() + 7, 0);   // end of the 6th whole month ahead (same as the database)
     for (; d <= end; d.setDate(d.getDate() + 7)) if (weekOfMonth(d) === w) out.push(new Date(d));
     return out;
   }
@@ -3462,7 +3478,7 @@
     const ccwOkForever = (r) => r && r.ccw_qualified && (!r.ccw_expires_on || daysUntil(r.ccw_expires_on) >= 0);
 
     content.push(h('p', { class: 'muted small' },
-      'Pick who serves each post by week of the month, then apply. Every matching Sunday in the next 6 months is filled in, and new months keep filling in from this grid automatically.'));
+      'Pick who serves each post by week of the month, then apply. Every matching Sunday in the next 6 whole months is filled in. On the 1st of each month the next month is added automatically from this grid, so the latest grid always carries forward.'));
     content.push(h('div', { class: 'card positions-card' },
       h('h3', {}, 'Positions'),
       services.map((g) => h('div', { class: 'pos-line' },

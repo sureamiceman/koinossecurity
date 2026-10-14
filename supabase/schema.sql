@@ -836,15 +836,25 @@ begin
   perform set_config('koinos.template', '', true);
 end $$;
 
--- Create any missing events up to ~6 months ahead; optionally remove
+-- How far ahead repeating events are filled in: the rest of this month plus
+-- six whole months (on Oct 14 → through Apr 30). On the 1st of each month
+-- the next whole month is added, so there are always 6 full months ahead.
+create or replace function public.schedule_horizon() returns date
+language sql stable set search_path = public as $$
+  select (date_trunc('month', (now() at time zone 'America/New_York')::date) + interval '7 months' - interval '1 day')::date
+$$;
+
+-- Create any missing events up to the horizon above; optionally remove
 -- (non-customized) events from p_from on that no longer fit the pattern.
+-- New dates take their people from the current rotation grid / defaults,
+-- so a saved rotation keeps carrying forward month after month.
 create or replace function public.materialize_series(p_series uuid, p_from date, p_prune boolean)
 returns void language plpgsql security definer set search_path = public as $$
 declare
   s       public.event_series;
   d       date;
   ev      uuid;
-  horizon date := current_date + 182;
+  horizon date := public.schedule_horizon();
 begin
   select * into s from public.event_series where id = p_series;
   if not found then return; end if;
@@ -873,7 +883,31 @@ begin
   perform set_config('koinos.template', '', true);
 end $$;
 
--- Called by the app when it loads, so open-ended series keep rolling forward.
+-- Rolls every open-ended series forward to the horizon. Run nightly by the
+-- database itself (pg_cron, below) and by the hourly Netlify job as a
+-- backup; not callable from the app.
+create or replace function public.roll_schedule() returns void
+language plpgsql security definer set search_path = public as $$
+declare r record;
+begin
+  for r in select id from public.event_series where until is null or until >= current_date loop
+    perform public.materialize_series(r.id, current_date, false);
+  end loop;
+end $$;
+revoke all on function public.roll_schedule() from public, anon, authenticated;
+grant execute on function public.roll_schedule() to service_role;
+
+-- Nightly at 1:15 AM Eastern (05:15 UTC). If pg_cron isn't available the rest of
+-- this file still runs; the schedule then rolls forward from the hourly Netlify
+-- job and whenever someone opens the app.
+do $$ begin
+  create extension if not exists pg_cron;
+  perform cron.schedule('koinos-roll-schedule', '15 5 * * *', 'select public.roll_schedule()');
+exception when others then
+  raise notice 'pg_cron not available (%): the schedule will roll forward from the app and the Netlify job instead.', sqlerrm;
+end $$;
+
+-- Also called by the app when it loads (a third safety net).
 create or replace function public.extend_series() returns void
 language plpgsql security definer set search_path = public as $$
 declare r record;

@@ -33,7 +33,14 @@ export default async () => {
   if (!serviceKey || !vapidPrivate) { console.log('shift-reminders: not set up (missing environment variables)'); return; }
   webpush.setVapidDetails('https://koinossecurity.netlify.app', VAPID_PUBLIC_KEY, vapidPrivate);
   const db = makeDb(serviceKey);
-  const res = await run({ db, now: new Date(), send: (deliveries) => sendAll(db, deliveries) });
+  const now = new Date();
+  // Backup for the database's own nightly job: once a day (2 AM Eastern) make
+  // sure repeating services are filled in 6 whole months ahead.
+  if (zoneParts(now).h === 2) {
+    try { await db.post('rpc/roll_schedule', {}); console.log('shift-reminders: schedule rolled forward'); }
+    catch (e) { console.log('shift-reminders: roll_schedule failed (run the latest supabase/schema.sql?)', e.message); }
+  }
+  const res = await run({ db, now, send: (deliveries) => sendAll(db, deliveries) });
   console.log('shift-reminders', JSON.stringify(res));
 };
 
