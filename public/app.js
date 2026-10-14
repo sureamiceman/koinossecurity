@@ -27,6 +27,7 @@
     showArchived: false,
     sopQuery: '',
     sopTab: null,
+    sopTrail: [],   // SOPs you followed a link from, so Back returns to them
     teamFilter: null,
     channel: null,
     installPrompt: null,
@@ -229,22 +230,45 @@
   }
 
   // Formatted SOPs are stored as HTML from the admin editor. Shown through
-  // this allow-list: only these tags (and links to web/mail/phone) survive,
-  // rebuilt as new elements, so nothing in the HTML can ever run.
+  // this allow-list: only these tags (and links to web/mail/phone or to
+  // another SOP) survive, rebuilt as new elements, so nothing in the HTML can
+  // ever run. Pictures are <img data-photo="sops/<file>"> (a path in the
+  // private photo storage, never a web address); with { media: true } they
+  // are shown from this device's saved copy (see SOP pictures below).
+  const SOP_HREF = /^#\/sops\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+  const SOP_PHOTO = /^sops\/[A-Za-z0-9-]{1,64}\.(jpg|png|webp)$/;
   const SAFE_TAGS = new Set(['P', 'BR', 'H2', 'H3', 'H4', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'MARK', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'HR', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'A']);
   const DROP_TAGS = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'TEMPLATE', 'SVG', 'MATH', 'NOSCRIPT', 'FORM', 'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'IMG', 'VIDEO', 'AUDIO', 'LINK', 'META', 'COLGROUP', 'COL']);
-  function safeHtml(html, cls) {
+  function safeHtml(html, cls, opts) {
+    const media = !!(opts && opts.media);
     // (style attributes are renamed first, so the site's no-inline-styles rule never has to step in)
     const src = new DOMParser().parseFromString(String(html || '').replace(/\sstyle\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, ' data-st=$1'), 'text/html').body;
     const copy = (from, to) => {
       for (const n of from.childNodes) {
         if (n.nodeType === 3) { to.append(n.textContent); continue; }
+        if (n.nodeType === 1 && n.tagName === 'IMG') {
+          const path = n.getAttribute('data-photo') || '';
+          if (media && SOP_PHOTO.test(path)) to.append(sopFigure(path, n.getAttribute('alt') || ''));
+          continue;
+        }
         if (n.nodeType !== 1 || DROP_TAGS.has(n.tagName)) continue;
         if (!SAFE_TAGS.has(n.tagName)) { copy(n, to); continue; }   // unknown wrapper: keep its text
         const el = document.createElement(n.tagName === 'B' ? 'strong' : n.tagName === 'I' ? 'em' : n.tagName.toLowerCase());
         if (n.tagName === 'A') {
           const href = (n.getAttribute('href') || '').trim();
-          if (/^(https?:\/\/|mailto:|tel:)/i.test(href)) { el.setAttribute('href', href); el.setAttribute('target', '_blank'); el.setAttribute('rel', 'noopener noreferrer'); }
+          const sm = SOP_HREF.exec(href);
+          if (sm) {
+            // A link to another SOP: opens it in the app. Shows in that SOP's tab color.
+            const target = state.data.sops.find((x) => x.id === sm[1].toLowerCase());
+            if (!target) {
+              const gone = h('span', { class: 'sop-link-gone', title: 'The linked SOP was deleted' });
+              copy(n, gone);
+              to.append(gone);
+              continue;
+            }
+            el.setAttribute('href', '#/sops/' + encodeURIComponent(target.id));
+            el.className = `sop-link tc-${sopTabOf(target.category).color}`;
+          } else if (/^(https?:\/\/|mailto:|tel:)/i.test(href)) { el.setAttribute('href', href); el.setAttribute('target', '_blank'); el.setAttribute('rel', 'noopener noreferrer'); }
         }
         if (n.tagName === 'OL' && /^\d{1,4}$/.test(n.getAttribute('start') || '')) el.setAttribute('start', n.getAttribute('start'));
         if ((n.tagName === 'TD' || n.tagName === 'TH')) for (const a of ['colspan', 'rowspan']) if (/^\d{1,2}$/.test(n.getAttribute(a) || '')) el.setAttribute(a, n.getAttribute(a));
@@ -257,7 +281,7 @@
     return root;
   }
   // An SOP body (or its previous version) as something to show / search / preview.
-  const sopBody = (body, format, cls) => (format === 'html' ? safeHtml(body, cls) : richText(body, cls));
+  const sopBody = (body, format, cls) => (format === 'html' ? safeHtml(body, cls, { media: true }) : richText(body, cls));
   const sopPlainCache = new Map();
   function sopPlain(body, format) {
     if (format !== 'html') return plainText(body);
@@ -448,6 +472,7 @@
     if (!errors.length) retryAttendanceEmails();
     if (!errors.length) await purgeBoard().catch(() => {});
     await resolvePhotos();
+    syncSopImages();
     render();
     if (errors.length) toast(navigator.onLine ? 'Could not refresh — showing saved information' : 'Offline — showing saved information');
     else if (showToast) toast('Up to date');
@@ -523,7 +548,7 @@
   // ------------------------------------------------------------------
   // Photos
   // ------------------------------------------------------------------
-  async function resizeImage(file, max = 1400) {
+  async function resizeImage(file, max = 1400, quality = 0.85) {
     let src;
     try {
       src = await createImageBitmap(file, { imageOrientation: 'from-image' });
@@ -540,9 +565,12 @@
     const c = document.createElement('canvas');
     c.width = Math.round(w * scale);
     c.height = Math.round(ht * scale);
-    c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+    const g = c.getContext('2d');
+    g.fillStyle = '#fff';   // see-through parts of a PNG turn white, not black
+    g.fillRect(0, 0, c.width, c.height);
+    g.drawImage(src, 0, 0, c.width, c.height);
     return new Promise((resolve, reject) =>
-      c.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not process that image.'))), 'image/jpeg', 0.85));
+      c.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not process that image.'))), 'image/jpeg', quality));
   }
 
   // Returns { path, oldToRemove }
@@ -569,6 +597,193 @@
     dlg.addEventListener('close', () => dlg.remove());
     document.body.append(dlg);
     dlg.showModal();
+  }
+
+  // ------------------------------------------------------------------
+  // SOP pictures (maps, annotated screenshots)
+  // ------------------------------------------------------------------
+  // Kept larger and sharper than other photos so labels on a map stay
+  // readable when zoomed. Every SOP picture is saved on each phone (browser
+  // Cache Storage) the first time the app sees it online, so SOPs keep their
+  // maps with no signal. The saved copies are removed when they're no longer
+  // in any SOP, and on sign-out.
+  const SOP_IMG_CACHE = 'koinos-sop-images';
+  const sopImg = { urls: new Map(), keep: new Set(), running: null, again: false };
+  const sopImagePaths = (html) => [...String(html || '').matchAll(/data-photo="(sops\/[A-Za-z0-9-]{1,64}\.(?:jpg|png|webp))"/g)].map((m) => m[1]);
+  const sopImgKey = (path) => '/__sop-image/' + path;
+  async function sopImgCache() { try { return window.caches ? await caches.open(SOP_IMG_CACHE) : null; } catch { return null; } }
+
+  // A picture's address on this device (from the saved copy, or downloaded and saved now).
+  async function loadSopImages(paths) {
+    const cache = await sopImgCache();
+    const missing = [];
+    let added = false;
+    for (const p of paths) {
+      if (sopImg.urls.has(p)) continue;
+      const hit = cache ? await cache.match(sopImgKey(p)).catch(() => null) : null;
+      if (hit) { sopImg.urls.set(p, URL.createObjectURL(await hit.blob())); added = true; } else missing.push(p);
+    }
+    if (missing.length && navigator.onLine) {
+      const { data } = await sb.storage.from('photos').createSignedUrls(missing, 600).catch(() => ({ data: null }));
+      await Promise.all((data || []).map(async (d) => {
+        if (!d.signedUrl || !d.path) return;
+        try {
+          const res = await fetch(d.signedUrl);
+          if (!res.ok) return;
+          const blob = await res.blob();
+          if (cache) await cache.put(sopImgKey(d.path), new Response(blob, { headers: { 'Content-Type': blob.type || 'image/jpeg' } })).catch(() => {});
+          sopImg.urls.set(d.path, URL.createObjectURL(blob));
+          added = true;
+        } catch { /* try again next time */ }
+      }));
+    }
+    return added;
+  }
+  async function sopImageUrl(path) {
+    if (!sopImg.urls.has(path)) await loadSopImages([path]);
+    return sopImg.urls.get(path) || null;
+  }
+
+  // Make sure every picture in the current SOPs is saved on this device.
+  function syncSopImages() {
+    if (sopImg.running) { sopImg.again = true; return sopImg.running; }
+    sopImg.running = (async () => {
+      const want = new Set(state.data.sops.filter((s) => s.format === 'html').flatMap((s) => sopImagePaths(s.body)));
+      const added = await loadSopImages([...want]);
+      const cache = await sopImgCache();
+      if (cache && navigator.onLine) {
+        for (const req of await cache.keys().catch(() => [])) {
+          const p = decodeURIComponent(new URL(req.url).pathname.replace('/__sop-image/', ''));
+          if (!want.has(p) && !sopImg.keep.has(p)) cache.delete(req).catch(() => {});
+        }
+      }
+      if (added) render();
+    })().catch(() => {}).finally(() => {
+      sopImg.running = null;
+      if (sopImg.again) { sopImg.again = false; syncSopImages(); }
+    });
+    return sopImg.running;
+  }
+  async function forgetSopImages() {
+    for (const u of sopImg.urls.values()) URL.revokeObjectURL(u);
+    sopImg.urls.clear();
+    sopImg.keep.clear();
+    try { if (window.caches) await caches.delete(SOP_IMG_CACHE); } catch { /* ignore */ }
+  }
+
+  // Shrinks a picture for an SOP and stores it. Returns its path.
+  async function uploadSopImage(file) {
+    try {
+      let blob = await resizeImage(file, 2400, 0.9);
+      if (blob.size > 4.5 * 1024 * 1024) blob = await resizeImage(file, 2000, 0.78);
+      const path = `sops/${crypto.randomUUID()}.jpg`;
+      const { error } = await sb.storage.from('photos').upload(path, blob, { contentType: 'image/jpeg', upsert: false });
+      if (error) throw error;
+      sopImg.keep.add(path);
+      sopImg.urls.set(path, URL.createObjectURL(blob));
+      const cache = await sopImgCache();
+      if (cache) cache.put(sopImgKey(path), new Response(blob, { headers: { 'Content-Type': 'image/jpeg' } })).catch(() => {});
+      return path;
+    } catch (e) {
+      toast(navigator.onLine ? 'Could not add the picture: ' + friendlyError(e) : 'Pictures can only be added with a connection.', 5000);
+      throw e;
+    }
+  }
+
+  // Removes stored pictures that no SOP (current text or previous version) uses any more.
+  async function cleanupSopImages(candidates) {
+    const paths = [...new Set(candidates)].filter((p) => SOP_PHOTO.test(p));
+    if (!paths.length) return;
+    const { data, error } = await sb.from('sops').select('body, prev_body');
+    if (error || !data) return;
+    const used = new Set(data.flatMap((r) => [...sopImagePaths(r.body), ...sopImagePaths(r.prev_body)]));
+    const gone = paths.filter((p) => !used.has(p));
+    for (const p of paths) sopImg.keep.delete(p);
+    if (gone.length) sb.storage.from('photos').remove(gone).then(() => {}, () => {});
+  }
+
+  // A picture inside an SOP: tap to see it full screen.
+  function sopFigure(path, alt) {
+    const url = sopImg.urls.get(path);
+    if (!url) {
+      return h('div', { class: 'rt-img missing' }, navigator.onLine ? 'Loading picture…'
+        : 'This picture isn\'t saved on this device yet. Open this SOP once with a connection and it will be kept for offline use.');
+    }
+    return h('button', { type: 'button', class: 'rt-img', 'aria-label': (alt ? alt + '. ' : '') + 'Open the picture full screen', onclick: () => viewImage(url, alt) },
+      h('img', { src: url, alt: alt || '' }),
+      h('span', { class: 'rt-img-hint', 'aria-hidden': 'true' }, 'Tap to enlarge'));
+  }
+
+  // Full screen, with tap to zoom in on the spot you tapped (and tap again to fit).
+  function viewImage(url, alt) {
+    const img = h('img', { src: url, alt: alt || '' });
+    const pane = h('div', { class: 'zoom-pane' }, img);
+    const hint = h('div', { class: 'zoom-hint' }, 'Tap the picture to zoom in');
+    const dlg = h('dialog', { class: 'photo-dialog zoomable' }, pane, hint,
+      h('button', { class: 'icon-btn', 'aria-label': 'Close', onclick: () => dlg.close() }, icon('x')));
+    img.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (pane.classList.contains('zoomed')) {
+        pane.classList.remove('zoomed');
+        img.style.width = '';
+        hint.textContent = 'Tap the picture to zoom in';
+        return;
+      }
+      const r = img.getBoundingClientRect();
+      const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
+      pane.classList.add('zoomed');
+      img.style.width = Math.max(img.naturalWidth, Math.round(r.width * 2.5)) + 'px';
+      pane.scrollLeft = fx * img.offsetWidth - pane.clientWidth / 2;
+      pane.scrollTop = fy * img.offsetHeight - pane.clientHeight / 2;
+      hint.textContent = 'Drag to look around · tap to fit';
+    });
+    pane.addEventListener('click', (e) => { if (e.target === pane && !pane.classList.contains('zoomed')) dlg.close(); });
+    dlg.addEventListener('close', () => dlg.remove());
+    document.body.append(dlg);
+    dlg.showModal();
+  }
+
+  // Pick an SOP to link to (from the SOP editor). Resolves { id, title },
+  // { remove: true } or null.
+  function pickSopDialog({ current }, excludeId) {
+    return new Promise((resolve) => {
+      let result = null;
+      const dlg = h('dialog', { class: 'sop-picker' });
+      const search = h('input', { class: 'search', type: 'search', placeholder: 'Search SOPs', 'aria-label': 'Search SOPs' });
+      const list = h('div', { class: 'sop-picker-list' });
+      const choose = (r) => { result = r; dlg.close(); };
+      const draw = () => {
+        const q = search.value.trim().toLowerCase();
+        const tabs = sopTabs();
+        const rows = state.data.sops.filter((x) => x.id !== excludeId && `${x.title} ${x.category}`.toLowerCase().includes(q));
+        list.replaceChildren();
+        if (!rows.length) { list.append(h('div', { class: 'muted small sop-empty' }, state.data.sops.length > 1 ? 'No SOPs match.' : 'There are no other SOPs yet. Save the SOP you want to link to first.')); return; }
+        for (const t of tabs) {
+          const inTab = rows.filter((x) => x.category === t.name).sort(sopSort);
+          if (!inTab.length) continue;
+          append(list, [h('div', { class: `sop-picker-tab tc-${t.color}` }, h('span', { class: `sop-chip tc-${t.color}` }, t.name)),
+            inTab.map((x) => h('button', { type: 'button', class: `sop-picker-item tc-${t.color}` + (x.id === current ? ' on' : ''), onclick: () => choose({ id: x.id, title: x.title }) },
+              h('span', { class: 'grow' }, x.title), x.id === current ? h('span', { class: 'muted small' }, 'linked now') : null))]);
+        }
+      };
+      search.addEventListener('input', draw);
+      draw();
+      append(dlg, [
+        h('div', { class: 'dlg-head' }, h('h2', {}, 'Link to an SOP'),
+          h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: () => dlg.close() }, icon('x'))),
+        h('div', { class: 'dlg-body' },
+          h('p', { class: 'muted small' }, 'Tip: select some words first to turn them into the link. Otherwise the SOP\'s title is put in.'),
+          search, list),
+        h('div', { class: 'dlg-foot' },
+          current ? h('button', { type: 'button', class: 'btn danger', onclick: () => choose({ remove: true }) }, 'Remove link') : null,
+          h('div', { class: 'spacer' }),
+          h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Cancel'))
+      ]);
+      dlg.addEventListener('close', () => { dlg.remove(); resolve(result); });
+      document.body.append(dlg);
+      dlg.showModal();
+      search.focus();
+    });
   }
 
   // ------------------------------------------------------------------
@@ -810,6 +1025,7 @@
   async function afterSave(table, msg) {
     await refreshTable(table);
     await resolvePhotos();
+    if (table === 'sops') syncSopImages();
     render();
     if (msg) toast(msg);
   }
@@ -969,6 +1185,7 @@
     if (isMember() && state.profile.full_name) {
       loadCachedData();
       render();
+      syncSopImages();   // offline: show the saved pictures straight away
       await refreshAll();
       subscribe();
       syncPush();
@@ -988,6 +1205,8 @@
     state.profilePrompted = false;
     state.data = emptyData();
     state.photoUrls = {};
+    state.sopTrail = [];
+    forgetSopImages();
     history.replaceState(null, '', '/');
     render();
   }
@@ -1033,7 +1252,7 @@
 
     return h('div', { class: 'shell' },
       h('header', { class: 'topbar' },
-        v.back ? h('button', { class: 'icon-btn', 'aria-label': 'Back', onclick: () => { location.hash = v.back; } }, icon('back')) : null,
+        v.back ? h('button', { class: 'icon-btn', 'aria-label': 'Back', onclick: () => { if (v.onBack) v.onBack(); location.hash = v.back; } }, icon('back')) : null,
         h('h1', {}, v.title),
         v.action || null),
       navigator.onLine ? null : h('div', { class: 'offline-bar' }, 'Offline — showing saved information'),
@@ -1174,6 +1393,7 @@
 
   function sopsView(id) {
     if (id) return sopDetailView(id);
+    state.sopTrail = [];
     const search = h('input', { class: 'search', type: 'search', placeholder: 'Search all SOPs', 'aria-label': 'Search all SOPs' });
     search.value = state.sopQuery;
     const wrap = h('div', {});
@@ -1316,15 +1536,30 @@
     const s = state.data.sops.find((x) => x.id === id);
     if (!s) return { title: 'SOP', back: '#/sops', content: empty('This SOP was not found.', 'book') };
     const who = nameOf(s.updated_by);
+    // Back goes to the SOP whose link brought you here (e.g. Alpha → Fire).
+    const trail = state.sopTrail;
+    const at = trail.indexOf(s.id);
+    if (at >= 0) trail.length = at;
+    const from = sopById(trail[trail.length - 1]);
+    if (trail.length && !from) trail.length = 0;
+    const body = sopBody(s.body, s.format, 'sop-body');
+    body.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('a.sop-link')) state.sopTrail.push(s.id); });
+    // Other SOPs that link here.
+    const needle = '#/sops/' + s.id;
+    const linkedFrom = state.data.sops.filter((x) => x.id !== s.id && x.format === 'html' && String(x.body || '').toLowerCase().includes(needle)).sort((a, b) => a.title.localeCompare(b.title));
     return {
       title: s.category || 'SOP',
-      back: '#/sops',
+      back: from ? '#/sops/' + encodeURIComponent(from.id) : '#/sops',
+      onBack: () => { if (from) state.sopTrail.pop(); },
       action: isAdmin() ? topAction('Edit', () => editSop(s)) : null,
       content: h('article', { class: `card sop-detail tc-${sopTabOf(s.category).color}` },
+        from ? h('a', { class: 'sop-back-link', href: '#/sops/' + encodeURIComponent(from.id), onclick: () => state.sopTrail.pop() }, '‹ Back to ' + from.title) : null,
         h('span', { class: `sop-chip tc-${sopTabOf(s.category).color}` }, s.category || 'General'),
         h('h2', {}, s.title),
         h('div', { class: 'meta' }, `Updated ${fmtDateTime(s.updated_at)}${who ? ' by ' + who : ''}`),
-        sopBody(s.body, s.format, 'sop-body'),
+        body,
+        linkedFrom.length ? h('div', { class: 'sop-linked-from' }, h('span', { class: 'muted small' }, 'Linked from'),
+          linkedFrom.map((x) => h('a', { class: `sop-link tc-${sopTabOf(x.category).color}`, href: '#/sops/' + encodeURIComponent(x.id) }, x.title))) : null,
         isAdmin() && s.prev_body != null ? h('div', { class: 'actions' },
           h('button', { class: 'btn small', onclick: () => revertSop(s) }, 'Revert to previous version')) : null)
     };
@@ -1383,6 +1618,9 @@
       try { await loadSopEditor(); } catch (e) { clearTimeout(t); toast(friendlyError(e), 5000); return; }
       clearTimeout(t);
     }
+    let ed = null, saved = false;
+    const uploaded = [];
+    const before = [...sopImagePaths(s.body), ...sopImagePaths(s.prev_body)];
     const startHtml = !fancy ? null : isNew ? (prefill && prefill.body ? textToHtml(prefill.body) : '')
       : s.format === 'html' ? s.body : textToHtml(s.body);
     openForm({
@@ -1395,19 +1633,34 @@
         { name: 'category', label: 'Tab', type: 'select', options: sopTabs().map((t) => [t.name, t.name]), default: currentSopTab().name,
           hint: isNew ? 'Starts in the tab you were looking at. Change it if this belongs somewhere else.' : null },
         fancy ? { name: 'body', label: 'Procedure', type: 'custom', build: (box) => {
-          const ed = window.KoinosEditor.create(box, { html: startHtml, placeholder: 'Write the procedure. Tip: paste from Word or Google Docs to keep lists and tables.' });
-          return { get: () => (ed.isEmpty() ? '' : ed.getHTML()), destroy: () => ed.destroy() };
+          ed = window.KoinosEditor.create(box, {
+            html: startHtml,
+            placeholder: 'Write the procedure. Tip: paste from Word or Google Docs to keep lists and tables.',
+            uploadImage: async (file) => { const p = await uploadSopImage(file); uploaded.push(p); return p; },
+            imageUrl: (p) => sopImageUrl(p),
+            pickSop: (o) => pickSopDialog(o, s.id)
+          });
+          return {
+            get: () => (ed.isEmpty() ? '' : ed.getHTML()),
+            // Closed without saving: pictures added this time aren't needed.
+            destroy: () => { ed.destroy(); if (!saved) cleanupSopImages(uploaded); }
+          };
         } } : { name: 'body', label: 'Procedure', type: 'textarea', rich: true, rows: 14, placeholder: '1. First step\n2. Second step\n…' },
         { name: 'sort_order', label: 'Sort order', type: 'number', default: 0, inputmode: 'numeric', hint: 'Lower numbers appear first within the category.' }
       ],
       onSubmit: async (v) => {
+        if (ed && ed.isBusy()) throw new Error('A picture is still uploading. Wait a moment, then save.');
         if (fancy) v.format = 'html';
         await saveRow('sops', s.id, v);
+        saved = true;
+        cleanupSopImages([...before, ...uploaded]);   // pictures taken out of the SOP
         if (isNew) { const t = sopTabOf(v.category); state.sopTab = tabKey(t); cacheSet('sopTab', state.sopTab); }
         await afterSave('sops', isNew ? (fromThread ? 'SOP created from the thread' : 'SOP added') : 'SOP saved');
       },
       onDelete: isNew ? null : async () => {
         await deleteRow('sops', s.id);
+        saved = true;
+        cleanupSopImages([...before, ...uploaded]);
         location.hash = '#/sops';
         await afterSave('sops', 'SOP deleted');
       },

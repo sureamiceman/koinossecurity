@@ -670,3 +670,33 @@ dialog .cbtns { margin-top: 14px; }
 .positions-card h3 { margin-bottom: 4px; }
 .pos-line { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); }
 .pos-line:first-of-type { border-top: 0; }
+
+/* ---------- SOP pictures and links between SOPs ---------- */
+.rt-img { display: block; position: relative; width: 100%; margin: .8em 0; padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg); cursor: zoom-in; color: inherit; font: inherit; }
+.rt-img img { display: block; width: 100%; height: auto; max-height: 75vh; object-fit: contain; }
+.rt-img-hint { display: block; padding: 5px 8px; border-top: 1px solid var(--border); background: var(--surface); color: var(--muted); font-size: .78rem; font-weight: 600; text-align: center; }
+.rt-img.missing { cursor: default; padding: 22px 14px; text-align: center; color: var(--muted); font-size: .9rem; border-style: dashed; }
+.rt a.sop-link, .sop-linked-from a.sop-link { display: inline-block; color: var(--tc); background: var(--tc-bg); box-shadow: inset 0 0 0 1px var(--tc); border-radius: 8px; padding: 1px 8px; margin: 1px 0; font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
+.rt a.sop-link::after, .sop-linked-from a.sop-link::after { content: ' ›'; }
+.sop-link-gone { color: var(--muted); text-decoration: line-through; }
+.sop-linked-from { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border); }
+.sop-back-link { display: block; width: fit-content; margin-bottom: 10px; font-weight: 600; color: var(--accent); text-decoration: none; }
+.photo-dialog.zoomable { padding: 0; overflow: hidden; }
+.zoom-pane { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.zoom-pane img { width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in; }
+.zoom-pane.zoomed { display: block; overflow: auto; -webkit-overflow-scrolling: touch; }
+.zoom-pane.zoomed img { max-width: none; max-height: none; cursor: zoom-out; }
+.zoom-hint { position: fixed; left: 50%; bottom: calc(14px + var(--safe-bottom)); transform: translateX(-50%); background: rgba(0,0,0,.6); color: #fff; font-size: .8rem; padding: 5px 12px; border-radius: 999px; pointer-events: none; white-space: nowrap; }
+.sop-picker { width: min(520px, 100vw); }
+.sop-picker .search { width: 100%; margin-bottom: 8px; }
+.sop-picker-list { max-height: 55vh; overflow-y: auto; }
+.sop-picker-tab { margin: 10px 0 2px; }
+.sop-picker-item { display: flex; width: 100%; align-items: center; gap: 8px; text-align: left; background: none; border: 0; border-left: 4px solid var(--tc, var(--border)); border-bottom: 1px solid var(--border); padding: 10px 12px; font: inherit; color: inherit; cursor: pointer; }
+.sop-picker-item:hover, .sop-picker-item:focus-visible { background: var(--bg); }
+.sop-picker-item.on { font-weight: 700; }
+/* In the editor */
+.sop-ed-img { margin: .8em 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg); }
+.sop-ed-img img { display: block; max-width: 100%; max-height: 420px; margin: 0 auto; }
+.sop-ed-img-note { padding: 18px; text-align: center; color: var(--muted); font-size: .9rem; }
+.sop-ed-img.ProseMirror-selectednode { outline: 3px solid var(--accent); outline-offset: 2px; }
+.sop-ed a[href^="#/sops/"] { background: var(--info-bg); border-radius: 6px; padding: 0 4px; font-weight: 600; text-decoration: none; }
