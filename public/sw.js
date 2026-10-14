@@ -4,7 +4,7 @@
 //
 // VERSION must change with every release (keep it equal to appVersion in
 // config.js): a changed file is how phones notice there's a new version.
-const VERSION = '1.16.0';
+const VERSION = '1.17.0';
 const CACHE = 'koinos-shell-' + VERSION;
 const SHELL = [
   '/', '/index.html', '/styles.css', '/app.js', '/config.js',
@@ -31,7 +31,8 @@ function askVersion(client, ms = 1500) {
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
+    // (SOP pictures saved for offline use live in their own cache and are kept.)
+    await Promise.all(keys.filter((k) => k !== CACHE && k !== 'koinos-sop-images').map((k) => caches.delete(k)));
     await self.clients.claim();
     // An old app that's open (often an installed app resumed from the
     // background, which never reloads by itself) is reloaded once onto this
