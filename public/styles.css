@@ -721,3 +721,6 @@ fieldset.declare legend { font-size: .85rem; font-weight: 700; color: var(--mute
 .declared { margin-top: 4px; }
 .declared-notice { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; color: var(--text); background: var(--info-bg); }
 .field.check input[type=checkbox] { flex: none; }
+.contact-list .list-item { align-items: center; }
+.contact-count { text-align: center; margin-top: 10px; }
+.contact-row .avatar { background: var(--muted); cursor: default; }
