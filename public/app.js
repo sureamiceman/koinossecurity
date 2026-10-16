@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [], app_settings: [] });
   const state = {
     session: null,
     profile: null,
@@ -32,11 +32,16 @@
     installPrompt: null,
     lastSeenAlerts: 0,
     att: { weeks: 8, drafts: {}, timer: null, inflight: null, correcting: null, setup: null, setupDirty: false, emailTried: {} },
-    attMissing: false
+    attMissing: false,
+    viewAsMember: false
   };
 
   const ROLE_LABELS = { pending: 'Pending approval', member: 'Member', admin: 'Admin', superuser: 'Superuser' };
-  const role = () => (state.profile && state.profile.role) || null;
+  const realRole = () => (state.profile && state.profile.role) || null;
+  // "View as member" (admins, this device only): the app acts as if you were a
+  // member, hiding every admin tool. The database still knows you're an admin.
+  const role = () => { const r = realRole(); return state.viewAsMember && (r === 'admin' || r === 'superuser') ? 'member' : r; };
+  const realAdmin = () => ['admin', 'superuser'].includes(realRole());
   const isMember = () => ['member', 'admin', 'superuser'].includes(role());
   const isAdmin = () => ['admin', 'superuser'].includes(role());
   const isSuper = () => role() === 'superuser';
@@ -258,7 +263,11 @@
           const sm = SOP_HREF.exec(href);
           if (sm) {
             // A link to another SOP: opens it in the app. Shows in that SOP's tab color.
-            const target = state.data.sops.find((x) => x.id === sm[1].toLowerCase());
+            const target = visibleSops().find((x) => x.id === sm[1].toLowerCase());
+            if (!target && state.data.sops.some((x) => x.id === sm[1].toLowerCase())) {   // hidden while Teams is off: just the words
+              copy(n, to);
+              continue;
+            }
             if (!target) {
               const gone = h('span', { class: 'sop-link-gone', title: 'The linked SOP was deleted' });
               copy(n, gone);
@@ -436,10 +445,11 @@
     attendance_counts: (t) => t.select('*').gte('service_date', attSince()).order('service_date', { ascending: false }),
     attendance_values: (t) => t.select('*, attendance_counts!inner(service_date)').gte('attendance_counts.service_date', attSince()),
     teams: (t) => t.select('*').order('sort_order'),
-    team_activations: (t) => t.select('*').order('created_at', { ascending: false }).limit(10)
+    team_activations: (t) => t.select('*').order('created_at', { ascending: false }).limit(10),
+    app_settings: (t) => t.select('*')
   };
   const attSince = () => isoDay(new Date(Date.now() - 200 * 864e5));
-  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
+  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'app_settings', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
 
   function loadCachedData() {
     for (const t of Object.keys(QUERIES)) {
@@ -574,6 +584,7 @@
         } else if (n.ended_at && !(payload.old || {}).ended_at) toast((n.drill ? 'Drill over: ' : '') + 'Stand down. The activation has ended.', 6000);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'teams' }, async () => { await refreshTable('teams'); render(); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'app_settings' }, async () => { await refreshTable('app_settings'); render(); })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance_counts' }, () => {
         clearTimeout(state.attTimer);
         state.attTimer = setTimeout(async () => { await Promise.all([refreshTable('attendance_counts'), refreshTable('attendance_values')]); render(); }, 400);
@@ -1063,6 +1074,17 @@
     const pw = h('input', { type: 'password', id: 'password', class: 'input', autocomplete: signup ? 'new-password' : 'current-password' });
     const name = signup ? h('input', { type: 'text', id: 'fullname', class: 'input', autocomplete: 'name', placeholder: 'First and last name' }) : null;
     const pw2 = signup ? h('input', { type: 'password', id: 'password2', class: 'input', autocomplete: 'new-password' }) : null;
+    // Self-declared at sign-up; an admin confirms before it goes on the roster.
+    const ccw = signup ? h('input', { type: 'checkbox', id: 'su_ccw' }) : null;
+    const ccwDate = signup ? h('input', { type: 'date', id: 'su_ccw_date', class: 'input' }) : null;
+    const med = signup ? h('input', { type: 'checkbox', id: 'su_med' }) : null;
+    const medQuals = signup ? h('input', { type: 'text', id: 'su_med_quals', class: 'input', placeholder: 'e.g. RN, EMT, Nurse Practitioner, MD, CPR/AED' }) : null;
+    const ccwWrap = signup ? h('div', { class: 'field sub-field hidden' }, h('label', { for: 'su_ccw_date' }, 'Date received (if known)'), ccwDate) : null;
+    const medWrap = signup ? h('div', { class: 'field sub-field hidden' }, h('label', { for: 'su_med_quals' }, 'Qualifications / certifications'), medQuals) : null;
+    if (signup) {
+      ccw.addEventListener('change', () => ccwWrap.classList.toggle('hidden', !ccw.checked));
+      med.addEventListener('change', () => medWrap.classList.toggle('hidden', !med.checked));
+    }
     const errEl = h('div', { class: 'error-text' + (a.error ? '' : ' hidden') }, a.error);
     const submitBtn = h('button', { class: 'btn primary block', type: 'submit' }, signup ? 'Create account' : 'Sign in');
     // Update the form in place so typed values are never wiped.
@@ -1079,7 +1101,11 @@
           if (!name.value.trim()) return fail('Enter your name.');
           if (pw.value.length < MIN_PASSWORD) return fail(`Password must be at least ${MIN_PASSWORD} characters.`);
           if (pw.value !== pw2.value) return fail("Passwords don't match.");
-          doSignUp(a.email, pw.value, name.value.trim());
+          if (med.checked && !medQuals.value.trim()) return fail('List your medical qualifications (e.g. RN, EMT), or untick the medical box.');
+          doSignUp(a.email, pw.value, name.value.trim(), {
+            ccw: ccw.checked, ccw_received_on: ccw.checked ? ccwDate.value : '',
+            medical: med.checked, medical_quals: med.checked ? medQuals.value.trim() : ''
+          });
         } else {
           if (!pw.value) return fail('Enter your password.');
           doSignIn(a.email, pw.value);
@@ -1092,6 +1118,10 @@
     h('div', { class: 'field' }, h('label', { for: 'password' }, 'Password'), pw,
       signup ? h('div', { class: 'hint' }, `At least ${MIN_PASSWORD} characters.`) : null),
     signup ? h('div', { class: 'field' }, h('label', { for: 'password2' }, 'Confirm password'), pw2) : null,
+    signup ? h('fieldset', { class: 'declare' },
+      h('legend', {}, 'About you (a team admin will confirm)'),
+      h('div', { class: 'field check' }, h('label', { for: 'su_ccw' }, ccw, 'I have a CCW qualification')), ccwWrap,
+      h('div', { class: 'field check' }, h('label', { for: 'su_med' }, med, 'I have medical training and can be a first responder for medical emergencies')), medWrap) : null,
     submitBtn,
     errEl,
     h('div', { class: 'actions' },
@@ -1114,10 +1144,10 @@
     // onAuthStateChange picks up the new session.
   }
 
-  async function doSignUp(email, password, fullName) {
+  async function doSignUp(email, password, fullName, declared = {}) {
     const a = state.auth;
     a.showError(''); a.setBusy(true);
-    const { data, error } = await sb.auth.signUp({ email, password, options: { data: { full_name: fullName } } });
+    const { data, error } = await sb.auth.signUp({ email, password, options: { data: { full_name: fullName, ...declared } } });
     a.setBusy(false);
     if (error) {
       a.showError(/already registered|already exists/i.test(error.message)
@@ -1253,7 +1283,7 @@
     let [tab, id, sub] = route();
     if ((tab === 'users' || tab === 'assignments') && !isAdmin()) tab = 'more';
     if (tab === 'attendance-setup' && !isAdmin()) tab = 'attendance';
-    if (tab === 'teams' && !isAdmin()) tab = 'contacts';
+    if (tab === 'teams' && (!isAdmin() || !teamsEnabled())) tab = 'contacts';
     if (tab === 'team') {   // the old Team tab: now Contacts → Security Team
       tab = 'contacts'; state.contactTab = 'team'; state.contactQuery = '';
       history.replaceState(null, '', '#/contacts');
@@ -1276,6 +1306,7 @@
         v.action || null),
       navigator.onLine ? null : h('div', { class: 'offline-bar' }, 'Offline — showing saved information'),
       activationBar(),
+      viewAsBar(),
       updateBar(),
       h('main', {}, v.content),
       h('nav', { class: 'tabbar', 'aria-label': 'Main' }, TABS.map(([key, label, ic]) => {
@@ -1304,10 +1335,11 @@
     if (!showing.length) content.push(empty(state.showArchived ? 'No past bulletins' : 'No active bulletins right now', 'bell'));
     for (const b of showing) content.push(bulletinCard(b));
 
-    if (teamsOn() && !activeActivation()) {
+    if (!activeActivation() && (isAdmin() || teamsOn() || teamWideRally())) {
       content.unshift(isAdmin()
-        ? h('div', { class: 'actions activation-entry' }, h('button', { class: 'btn activate-btn', onclick: activateTeam }, '🚨 Activate Security Team'), h('a', { class: 'btn small', href: '#/activation' }, 'Teams & rally points'))
-        : h('a', { class: 'list-item card-link', href: '#/activation' }, h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Emergency activation'), h('div', { class: 'sub' }, 'Your team, Rally Point and procedure')), icon('chev')));
+        ? h('div', { class: 'actions activation-entry' }, h('button', { class: 'btn activate-btn', onclick: activateTeam }, '🚨 Activate Security Team'), h('a', { class: 'btn small', href: '#/activation' }, teamsOn() ? 'Teams & rally points' : 'Rally Location'))
+        : h('a', { class: 'list-item card-link', href: '#/activation' }, h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Emergency activation'),
+          h('div', { class: 'sub' }, teamsOn() ? 'Your team, Rally Point and procedure' : 'Rally Location: ' + teamWideRally())), icon('chev')));
     }
     return { title: 'Alerts', action: isAdmin() ? topAction('+ New', () => editBulletin()) : null, content };
   }
@@ -1407,6 +1439,11 @@
     const tabs = sopTabs();
     return tabs.find((t) => tabKey(t) === state.sopTab) || tabs[0];
   }
+  // While Teams is off, the teams' own procedures (Alpha…Delta) are hidden from
+  // members; admins still see them, marked, so they can keep working on them.
+  const sopHiddenByTeams = (s) => !teamsEnabled() && state.data.teams.some((t) => t.sop_id === s.id);
+  const visibleSops = () => (isAdmin() ? state.data.sops : state.data.sops.filter((s) => !sopHiddenByTeams(s)));
+  const hiddenChip = (s) => (isAdmin() && sopHiddenByTeams(s) ? h('span', { class: 'badge muted-badge inline', title: 'Members don\'t see this while Teams is off (More → App settings).' }, 'Hidden: Teams off') : null);
   const sopTabOf = (name) => sopTabs().find((t) => t.name === name) || { name, color: 'gray' };
   const sopSort = (a, b) => (a.sort_order - b.sort_order) || a.title.localeCompare(b.title);
 
@@ -1427,7 +1464,7 @@
     const cur = currentSopTab();
     const ql = state.sopQuery.trim().toLowerCase();
     const searching = !!ql;
-    const count = (t) => state.data.sops.filter((s) => s.category === t.name).length;
+    const count = (t) => visibleSops().filter((s) => s.category === t.name).length;
 
     const rail = h('nav', { class: 'sop-rail', 'aria-label': 'SOP categories' }, tabs.map((t) => h('button', {
       type: 'button',
@@ -1444,7 +1481,7 @@
 
     let panel;
     if (searching) {
-      const rows = state.data.sops.filter((s) => `${s.title} ${s.category} ${sopPlain(s.body, s.format)}`.toLowerCase().includes(ql))
+      const rows = visibleSops().filter((s) => `${s.title} ${s.category} ${sopPlain(s.body, s.format)}`.toLowerCase().includes(ql))
         .sort((a, b) => (tabs.findIndex((t) => t.name === a.category) - tabs.findIndex((t) => t.name === b.category)) || sopSort(a, b));
       panel = h('section', { class: 'sop-panel tc-search' },
         h('div', { class: 'sop-panel-head' }, h('h2', {}, 'Search results'), h('span', { class: 'muted small' }, `${rows.length} found in all tabs`)),
@@ -1452,7 +1489,7 @@
           : h('div', { class: 'sop-empty' }, state.data.sops.length ? 'No SOPs match your search.' : 'No SOPs yet.',
             isAdmin() ? h('div', { class: 'actions' }, h('button', { class: 'btn small primary', onclick: () => editSop(null, { category: cur.name, title: state.sopQuery.trim() }) }, '+ New SOP')) : null));
     } else {
-      const rows = state.data.sops.filter((s) => s.category === cur.name).sort(sopSort);
+      const rows = visibleSops().filter((s) => s.category === cur.name).sort(sopSort);
       panel = h('section', { class: `sop-panel tc-${cur.color}` },
         h('div', { class: 'sop-panel-head' }, h('h2', {}, cur.name), h('span', { class: 'muted small' }, rows.length === 1 ? '1 SOP' : `${rows.length} SOPs`)),
         rows.length ? h('div', { class: 'sop-items' }, rows.map((s) => sopItem(s, false)))
@@ -1467,7 +1504,7 @@
     return h('a', { class: 'sop-item', href: '#/sops/' + encodeURIComponent(s.id) },
       h('div', { class: 'grow' },
         showTab ? h('span', { class: `sop-chip tc-${t.color}` }, t.name) : null,
-        h('div', { class: 'title' }, s.title),
+        h('div', { class: 'title' }, s.title, hiddenChip(s)),
         h('div', { class: 'sub' }, sopPlain(s.body, s.format).split('\n').find((l) => l.trim()) || '')),
       icon('chev'));
   }
@@ -1552,7 +1589,7 @@
 
 
   function sopDetailView(id) {
-    const s = state.data.sops.find((x) => x.id === id);
+    const s = visibleSops().find((x) => x.id === id);
     if (!s) return { title: 'SOP', back: '#/sops', content: empty('This SOP was not found.', 'book') };
     const who = nameOf(s.updated_by);
     // Back goes to the SOP whose link brought you here (e.g. Alpha → Fire).
@@ -1565,7 +1602,7 @@
     body.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('a.sop-link')) state.sopTrail.push(s.id); });
     // Other SOPs that link here.
     const needle = '#/sops/' + s.id;
-    const linkedFrom = state.data.sops.filter((x) => x.id !== s.id && x.format === 'html' && String(x.body || '').toLowerCase().includes(needle)).sort((a, b) => a.title.localeCompare(b.title));
+    const linkedFrom = visibleSops().filter((x) => x.id !== s.id && x.format === 'html' && String(x.body || '').toLowerCase().includes(needle)).sort((a, b) => a.title.localeCompare(b.title));
     return {
       title: s.category || 'SOP',
       back: from ? '#/sops/' + encodeURIComponent(from.id) : '#/sops',
@@ -1576,6 +1613,7 @@
         h('span', { class: `sop-chip tc-${sopTabOf(s.category).color}` }, s.category || 'General'),
         h('h2', {}, s.title),
         h('div', { class: 'meta' }, `Updated ${fmtDateTime(s.updated_at)}${who ? ' by ' + who : ''}`),
+        isAdmin() && sopHiddenByTeams(s) ? h('div', { class: 'notice' }, 'This is a team procedure. Members don\'t see it while Teams is off (More → App settings).') : null,
         body,
         linkedFrom.length ? h('div', { class: 'sop-linked-from' }, h('span', { class: 'muted small' }, 'Linked from'),
           linkedFrom.map((x) => h('a', { class: `sop-link tc-${sopTabOf(x.category).color}`, href: '#/sops/' + encodeURIComponent(x.id) }, x.title))) : null,
@@ -1924,8 +1962,8 @@
     }
     if (isAdmin()) out.push(h('div', { class: 'actions team-tools' },
       h('button', { class: 'btn small', onclick: () => editPerson() }, '+ Add team member'),
-      teamsOn() || isAdmin() ? h('a', { class: 'btn small', href: '#/teams' }, 'Manage teams') : null,
-      teamsOn() ? h('a', { class: 'btn small', href: '#/activation' }, 'Team activation') : null));
+      teamsEnabled() ? h('a', { class: 'btn small', href: '#/teams' }, 'Manage teams') : null,
+      h('a', { class: 'btn small', href: '#/activation' }, 'Team activation')));
     if (state.teamFilter === 'teams') out.push(...teamSections(all));
     else if (!showing.length) out.push(h('div', { class: 'sop-empty' },
       state.teamFilter === 'medical' ? 'Nobody is marked "Show on the Medical tab" yet.'
@@ -2011,6 +2049,33 @@
     });
   }
 
+  // In "Edit Security Team member": what the linked app account said about
+  // itself, with a button to copy it into this roster entry (then check it).
+  function declaredHelper(box) {
+    const draw = () => {
+      const sel = document.getElementById('f_profile_id');
+      const acct = sel && state.data.profiles.find((a) => a.id === sel.value);
+      box.replaceChildren();
+      const bits = declaredBits(acct);
+      box.closest('.field').classList.toggle('hidden', !bits.length);
+      if (!bits.length) return;
+      box.append(h('div', { class: 'notice declared-notice' },
+        h('div', {}, h('strong', {}, `${acct.full_name || acct.email} says: `), bits.join(' · ')),
+        acct.ccw_declared ? h('div', { class: 'small' }, 'CCW below needs the expiry date; they only gave the date received.') : null,
+        h('button', { type: 'button', class: 'btn small', onclick: () => {
+          const set = (id, fn) => { const el = document.getElementById(id); if (el) { fn(el); el.dispatchEvent(new Event('change', { bubbles: true })); } };
+          if (acct.ccw_declared) set('f_ccw_qualified', (el) => { el.checked = true; });
+          if (acct.medical_declared) {
+            set('f_is_medical', (el) => { el.checked = true; });
+            if (acct.medical_quals) set('f_medical_notes', (el) => { if (!el.value.trim()) el.value = acct.medical_quals; });
+          }
+          toast('Copied. Check it, add the CCW expiry date, then save.', 4000);
+        } }, 'Use what they said')));
+    };
+    setTimeout(() => { const sel = document.getElementById('f_profile_id'); if (sel) sel.addEventListener('change', draw); draw(); }, 0);
+    return { get: () => null };
+  }
+
   function editPerson(p) {
     const isNew = !p;
     p = p || {};
@@ -2027,6 +2092,7 @@
         { name: 'profile_id', label: 'App account', type: 'select',
           options: [['', 'Not linked'], ...accounts.map((a) => [a.id, `${a.full_name || '(no name)'} — ${a.email}`])],
           hint: 'Link the person\'s sign-in so they can see "My assignments" and volunteer or swap. Left blank, it links automatically when the email matches.' },
+        { name: 'declared', label: '', type: 'custom', build: declaredHelper },
         { name: 'photo', label: 'Photo', type: 'photo', currentUrl: p.photo_path ? state.photoUrls[p.photo_path] : null },
         { name: 'is_medical', label: 'Show on the Medical tab (medical point of contact)', type: 'checkbox' },
         { name: 'medical_notes', label: 'Medical qualifications', placeholder: 'e.g. RN, EMT, CPR/AED certified', visible: (v) => v.is_medical, hint: 'Shown under their name on the Medical tab.' },
@@ -2036,6 +2102,7 @@
         { name: 'active', label: 'Active on the team', type: 'checkbox', default: true }
       ],
       onSubmit: async (v, photo) => {
+        delete v.declared;
         if (!v.profile_id && v.email) {
           const match = accounts.find((a) => a.email && a.email.toLowerCase() === v.email.toLowerCase());
           const taken = match && state.data.roster.some((r) => r.profile_id === match.id && r.id !== p.id);
@@ -2073,13 +2140,18 @@
   //   #/teams        admins: edit teams, assign people
   //   #/activation   full team activation (admins start/end it)
   // ------------------------------------------------------------------
-  const teamsOn = () => state.data.teams.length > 0;
+  // App settings (More → App settings). Teams off hides Teams everywhere;
+  // nothing is deleted, and switching it back on brings it all back.
+  const appSettings = () => state.data.app_settings[0] || {};
+  const teamsEnabled = () => appSettings().teams_enabled !== false;
+  const teamWideRally = () => String(appSettings().rally_point || '').trim();
+  const teamsOn = () => teamsEnabled() && state.data.teams.length > 0;
   const teamsSorted = () => state.data.teams.slice().sort((a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
   const teamById = (id) => id && state.data.teams.find((t) => t.id === id);
-  const teamOfPerson = (r) => r && teamById(r.team_id);
+  const teamOfPerson = (r) => (teamsOn() && r && teamById(r.team_id)) || null;
   const rosterById = (id) => id && state.data.roster.find((r) => r.id === id);
   const leadOf = (t) => t && rosterById(t.lead_roster_id);
-  const isLead = (r) => !!(r && state.data.teams.some((t) => t.lead_roster_id === r.id));
+  const isLead = (r) => !!(teamsOn() && r && state.data.teams.some((t) => t.lead_roster_id === r.id));
   const sopById = (id) => id && state.data.sops.find((s) => s.id === id);
   const myTeam = () => teamOfPerson(myRoster());
   const teamChip = (t, extra) => t ? h('span', { class: `badge team-badge tc-${t.color}` }, t.name + (extra || '')) : null;
@@ -2212,10 +2284,17 @@
 
   // ---- Full team activation ----
   const activeActivation = () => state.data.team_activations.find((a) => !a.ended_at);
+  // Where to go on an activation (same rules as the notification, push.mjs):
+  //   Teams off → the Security Team Rally Location (More → App settings).
+  //   Teams on  → your team's Rally Point; not on a team → the Security Team
+  //               Rally Location, or the first team's if that isn't set.
   function myRally() {
+    const wide = teamWideRally();
+    if (!teamsOn()) return { team: null, where: wide || 'the Security Team Rally Location', everyone: true };
     const t = myTeam();
     const first = teamsSorted()[0];
     if (t) return { team: t, where: t.rally_point || `your ${t.name} Team rally point` };
+    if (wide) return { team: null, where: wide, unassigned: true };
     return { team: first || null, where: first && first.rally_point ? `${first.rally_point} (${first.name} Team)` : "your team's rally point", unassigned: true };
   }
 
@@ -2226,7 +2305,7 @@
     return h('a', { class: 'activation-bar', href: '#/activation' },
       h('div', { class: 'ab-title' }, (a.drill ? 'DRILL · ' : '') + '🚨 SECURITY TEAM ACTIVATED'),
       h('div', { class: 'ab-where' }, 'Go to: ', h('strong', {}, r.where)),
-      h('div', { class: 'ab-more' }, 'Tap for your team, lead and procedure'));
+      h('div', { class: 'ab-more' }, teamsOn() ? 'Tap for your team, lead and procedure' : 'Tap for details'));
   }
 
   function activationView() {
@@ -2236,7 +2315,11 @@
       const last = state.data.team_activations.slice().sort((x, y) => new Date(y.created_at) - new Date(x.created_at))[0];
       content.push(h('div', { class: 'card' },
         h('h3', {}, 'No activation in progress'),
-        h('p', { class: 'body-text' }, 'When an admin activates the security team, everyone gets an urgent notification telling them to go to their team\'s Rally Point, and this screen shows each team\'s lead and procedure.'),
+        h('p', { class: 'body-text' }, teamsOn()
+          ? 'When an admin activates the security team, everyone gets an urgent notification telling them to go to their team\'s Rally Point, and this screen shows each team\'s lead and procedure.'
+          : 'When an admin activates the security team, everyone gets an urgent notification telling them to go to the Security Team Rally Location.'),
+        h('div', { class: 'ac-go' }, teamsOn() ? 'Not on a team? Go to ' : 'Rally Location: ', h('strong', {}, teamWideRally() || (teamsOn() ? 'the first team\'s Rally Point' : 'not set yet')),
+          isAdmin() && !teamWideRally() ? h('div', { class: 'small' }, 'Set it under More → App settings.') : null),
         last ? h('div', { class: 'meta' }, `Last ${last.drill ? 'drill' : 'activation'}: ${fmtDateTime(last.created_at)} by ${nameOf(last.created_by) || 'an admin'}, ended ${last.ended_at ? fmtDateTime(last.ended_at) : ''}`) : null,
         isAdmin() ? h('div', { class: 'actions' }, h('button', { class: 'btn activate-btn block', onclick: activateTeam }, '🚨 Activate Security Team')) : null));
     } else {
@@ -2265,7 +2348,9 @@
   function activateTeam() {
     openForm({
       title: 'Activate Security Team',
-      intro: h('div', { class: 'notice urgent-notice' }, "This sends an urgent notification to every team member right now, telling each person to go to their team's Rally Point."),
+      intro: h('div', { class: 'notice urgent-notice' }, teamsOn()
+        ? "This sends an urgent notification to every team member right now, telling each person to go to their team's Rally Point."
+        : `This sends an urgent notification to every team member right now, telling everyone to go to ${teamWideRally() || 'the Security Team Rally Location (not set yet: More → App settings)'}.`),
       fields: [
         { name: 'drill', label: 'This is a drill', type: 'checkbox', hint: 'Notifications and the banner say DRILL.' },
         { name: 'message', label: "What's happening (optional)", type: 'textarea', rows: 3, placeholder: 'e.g. Suspicious person at the north entrance' }
@@ -4447,6 +4532,40 @@
   const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
   const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
+  function setViewAsMember(on) {
+    state.viewAsMember = !!on;
+    location.hash = on ? '#/alerts' : '#/more';
+    render();
+    toast(on ? 'Viewing as a member. Admin tools are hidden on this device.' : 'Back to your admin view');
+  }
+  function viewAsBar() {
+    if (!state.viewAsMember || !realAdmin()) return null;
+    return h('div', { class: 'view-as-bar', role: 'status' },
+      h('div', { class: 'grow' }, h('strong', {}, 'Viewing as a member'), h('div', { class: 'small' }, 'Admin tools are hidden on this device.')),
+      h('button', { class: 'btn small', onclick: () => setViewAsMember(false) }, 'Switch back'));
+  }
+
+  function editAppSettings() {
+    const missing = !state.data.app_settings.length;
+    openForm({
+      title: 'App settings',
+      intro: missing ? h('div', { class: 'notice' }, 'The database needs updating first: run supabase/schema.sql in the Supabase SQL editor.') : null,
+      values: { teams_enabled: teamsEnabled(), rally_point: teamWideRally() },
+      fields: [
+        { name: 'teams_enabled', label: 'Enable Teams (Alpha, Bravo, Charlie, Delta)', type: 'checkbox',
+          hint: 'Off hides Teams for everyone: team badges, By team, Manage teams, Your team, and the teams\' procedures in SOPs. Nothing is deleted; turning it back on brings it all back.' },
+        { name: 'rally_point', label: 'Security Team Rally Location', placeholder: 'e.g. Main lobby, by the welcome desk',
+          hint: 'Where everyone goes when the team is activated. With Teams on, people go to their own team\'s Rally Point and this is for anyone not on a team.' }
+      ],
+      onSubmit: async (v) => {
+        if (missing) throw new Error('Run the latest supabase/schema.sql first.');
+        const { error } = await sb.rpc('save_app_settings', { p_teams_enabled: !!v.teams_enabled, p_rally_point: v.rally_point || '' });
+        if (error) throw error;
+        await afterSave('app_settings', 'Settings saved');
+      }
+    });
+  }
+
   function moreView() {
     const p = state.profile;
     const content = [
@@ -4456,7 +4575,7 @@
             h('div', { class: 'title' }, h('strong', {}, p.full_name)),
             h('div', { class: 'muted small' }, p.email),
             myContact().phone ? h('div', { class: 'muted small' }, myContact().phone) : null,
-            h('span', { class: 'badge' + (isAdmin() ? ' bolo' : '') }, ROLE_LABELS[p.role])),
+            h('span', { class: 'badge' + (isAdmin() ? ' bolo' : '') }, ROLE_LABELS[role()] + (state.viewAsMember ? ' (preview)' : ''))),
           h('button', { class: 'btn small', onclick: () => editMyProfile() }, 'Edit profile')),
         profileIncomplete() ? h('p', { class: 'hint' }, 'Add your ' + missingParts().join(' and ') + ' so the team can reach and recognize you.') : null)
     ];
@@ -4477,14 +4596,25 @@
           h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Attendance form'),
             h('div', { class: 'sub' }, 'Sections, services, secretary email, export')),
           icon('chev')),
-        teamsOn() ? h('a', { class: 'list-item', href: '#/teams' },
+        h('button', { class: 'list-item', onclick: editAppSettings },
+          h('div', { class: 'grow' }, h('div', { class: 'title' }, 'App settings'),
+            h('div', { class: 'sub' }, `Teams ${teamsEnabled() ? 'on' : 'off'} · Rally Location: ${teamWideRally() || 'not set'}`)),
+          icon('chev')),
+        teamsEnabled() ? h('a', { class: 'list-item', href: '#/teams' },
           h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Manage teams'),
             h('div', { class: 'sub' }, 'Alpha, Bravo… leads, rally points, members')),
           icon('chev')) : null,
-        teamsOn() ? h('a', { class: 'list-item', href: '#/activation' },
+        h('a', { class: 'list-item', href: '#/activation' },
           h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Team activation'),
             h('div', { class: 'sub' }, 'Activate the whole security team')),
-          icon('chev')) : null));
+          icon('chev'))));
+    }
+    if (realAdmin()) {
+      content.push(h('div', { class: 'card view-as-card' },
+        h('div', { class: 'row' },
+          h('div', { class: 'grow' }, h('strong', {}, 'View as member'),
+            h('div', { class: 'muted small' }, state.viewAsMember ? 'On: you\'re seeing the app the way members do.' : 'See the app the way members do (this device only). Admin tools come back when you switch it off.')),
+          h('button', { class: 'btn small' + (state.viewAsMember ? ' primary' : ''), onclick: () => setViewAsMember(!state.viewAsMember) }, state.viewAsMember ? 'Switch back' : 'Turn on'))));
     }
 
     if (!isStandalone()) {
@@ -4559,16 +4689,25 @@
   function editMyProfile({ prompt = false } = {}) {
     const c = myContact();
     const canPhoto = profileFeature();
+    const canDeclare = declFeature(state.profile);
     openForm({
       title: prompt ? 'Complete your profile' : 'Your profile',
       intro: prompt ? h('p', { class: 'body-text dlg-intro' }, 'Add your phone number and a photo so the team can reach you and recognize you. You can skip this for now and do it later under More → Edit profile.') : null,
       submitLabel: 'Save',
       cancelLabel: prompt ? 'Skip for now' : 'Cancel',
-      values: { full_name: state.profile.full_name, phone: c.phone },
+      values: { full_name: state.profile.full_name, phone: c.phone,
+        ccw_declared: !!state.profile.ccw_declared, ccw_received_on: state.profile.ccw_received_on || '',
+        medical_declared: !!state.profile.medical_declared, medical_quals: state.profile.medical_quals || '' },
       fields: [
         { name: 'full_name', label: 'Name', required: true, autocomplete: 'name' },
         canPhoto ? { name: 'phone', label: 'Phone', type: 'tel', inputmode: 'tel', autocomplete: 'tel', placeholder: '(555) 555-5555' } : null,
-        canPhoto ? { name: 'photo', label: 'Photo', type: 'photo', currentUrl: c.photo_path ? state.photoUrls[c.photo_path] : null, hint: 'A clear photo of your face works best.' } : null
+        canPhoto ? { name: 'photo', label: 'Photo', type: 'photo', currentUrl: c.photo_path ? state.photoUrls[c.photo_path] : null, hint: 'A clear photo of your face works best.' } : null,
+        ...(canDeclare ? [
+          { name: 'ccw_declared', label: 'I have a CCW qualification', type: 'checkbox', hint: prompt ? null : 'A team admin confirms this before it shows on the roster.' },
+          { name: 'ccw_received_on', label: 'Date received (if known)', type: 'date', visible: (x) => x.ccw_declared },
+          { name: 'medical_declared', label: 'I have medical training and can be a first responder for medical emergencies', type: 'checkbox' },
+          { name: 'medical_quals', label: 'Qualifications / certifications', placeholder: 'e.g. RN, EMT, Nurse Practitioner, MD, CPR/AED', visible: (x) => x.medical_declared }
+        ] : [])
       ].filter(Boolean),
       onSubmit: async (v, photo) => {
         if (v.full_name !== state.profile.full_name) {
@@ -4591,6 +4730,18 @@
           state.profile.phone = v.phone || '';
           if (setPhoto) state.profile.photo_path = newPath;
         }
+        if (canDeclare) {
+          const pr = state.profile;
+          const next = { ccw_declared: !!v.ccw_declared, ccw_received_on: v.ccw_declared ? (v.ccw_received_on || null) : null,
+            medical_declared: !!v.medical_declared, medical_quals: v.medical_declared ? (v.medical_quals || '') : '' };
+          if (next.medical_declared && !next.medical_quals) throw new Error('List your medical qualifications (e.g. RN, EMT), or untick the medical box.');
+          if (next.ccw_declared !== !!pr.ccw_declared || (next.ccw_received_on || null) !== (pr.ccw_received_on || null)
+              || next.medical_declared !== !!pr.medical_declared || next.medical_quals !== (pr.medical_quals || '')) {
+            const { error } = await sb.rpc('update_my_qualifications', { p_ccw: next.ccw_declared, p_ccw_received_on: next.ccw_received_on, p_medical: next.medical_declared, p_medical_quals: next.medical_quals });
+            if (error) throw error;
+            Object.assign(pr, next);
+          }
+        }
         cacheSet('profile', state.profile);
         await Promise.all([refreshTable('roster'), refreshTable('profiles')]);
         await resolvePhotos();
@@ -4598,6 +4749,23 @@
         toast(profileIncomplete() ? 'Saved' : 'Profile complete — thanks!');
       }
     });
+  }
+
+  // What someone said about themselves (sign-up / Edit profile), for admins.
+  const declFeature = (p) => !!p && 'ccw_declared' in p;
+  function declaredBits(p) {
+    if (!declFeature(p)) return [];
+    const out = [];
+    if (p.ccw_declared) out.push('CCW' + (p.ccw_received_on ? ` (received ${fmtDay(p.ccw_received_on)})` : ''));
+    if (p.medical_declared) out.push('Medical' + (p.medical_quals ? `: ${p.medical_quals}` : ''));
+    return out;
+  }
+  function declaredLine(p) {
+    const bits = declaredBits(p);
+    if (!bits.length) return null;
+    const r = state.data.roster.find((x) => x.profile_id === p.id);
+    return h('div', { class: 'declared small' }, h('span', { class: 'muted' }, 'Says: '), bits.join(' · '),
+      r ? h('span', { class: 'muted' }, ` (on roster: ${[r.ccw_qualified ? 'CCW' : null, r.is_medical ? 'Medical' : null].filter(Boolean).join(', ') || 'neither yet'})`) : h('span', { class: 'muted' }, ' (not on the roster yet)'));
   }
 
   function usersView() {
@@ -4632,7 +4800,8 @@
           h('div', { class: 'who' },
             h('div', { class: 'title' }, h('strong', {}, p.full_name || '(no name yet)'), p.id === me ? ' (you)' : ''),
             h('div', { class: 'muted small' }, p.email),
-            h('div', { class: 'muted small' }, 'Joined ' + relTime(p.created_at))),
+            h('div', { class: 'muted small' }, 'Joined ' + relTime(p.created_at)),
+            declaredLine(p)),
           actions);
       })));
     }

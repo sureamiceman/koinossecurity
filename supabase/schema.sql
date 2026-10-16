@@ -76,12 +76,27 @@ language sql stable set search_path = public as $$
 $$;
 
 -- Create a profile automatically when someone signs in for the first time.
+-- What they said about themselves at sign-up (CCW, medical training) comes
+-- along too; an admin confirms it before it goes on the roster.
 create or replace function public.handle_new_user() returns trigger
 language plpgsql security definer set search_path = public as $$
+declare
+  m jsonb := coalesce(new.raw_user_meta_data, '{}'::jsonb);
+  received date;
 begin
   insert into public.profiles (id, email, full_name)
-  values (new.id, coalesce(new.email, ''), coalesce(new.raw_user_meta_data->>'full_name', ''))
+  values (new.id, coalesce(new.email, ''), coalesce(m->>'full_name', ''))
   on conflict (id) do nothing;
+  begin
+    begin received := nullif(m->>'ccw_received_on', '')::date; exception when others then received := null; end;
+    update public.profiles
+       set ccw_declared     = coalesce((m->>'ccw')::boolean, false),
+           ccw_received_on  = case when coalesce((m->>'ccw')::boolean, false) then received end,
+           medical_declared = coalesce((m->>'medical')::boolean, false),
+           medical_quals    = case when coalesce((m->>'medical')::boolean, false) then left(trim(coalesce(m->>'medical_quals', '')), 200) else '' end
+     where id = new.id;
+  exception when others then null;   -- never block a sign-up over these
+  end;
   return new;
 end $$;
 
@@ -495,6 +510,28 @@ $$;
 -- ---------------------------------------------------------------------
 alter table public.profiles add column if not exists phone text not null default '';
 alter table public.profiles add column if not exists photo_path text;
+
+-- Self-declared at sign-up (or later under Edit profile). Only a hint for
+-- admins: the roster's CCW / Medical fields are what the app goes by.
+alter table public.profiles add column if not exists ccw_declared boolean not null default false;
+alter table public.profiles add column if not exists ccw_received_on date;
+alter table public.profiles add column if not exists medical_declared boolean not null default false;
+alter table public.profiles add column if not exists medical_quals text not null default '';
+
+-- Anyone signed in (even while waiting for approval) can update what they declare.
+create or replace function public.update_my_qualifications(p_ccw boolean, p_ccw_received_on date, p_medical boolean, p_medical_quals text)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'Not signed in'; end if;
+  update public.profiles
+     set ccw_declared = coalesce(p_ccw, false),
+         ccw_received_on = case when coalesce(p_ccw, false) then p_ccw_received_on end,
+         medical_declared = coalesce(p_medical, false),
+         medical_quals = case when coalesce(p_medical, false) then left(trim(coalesce(p_medical_quals, '')), 200) else '' end
+   where id = auth.uid();
+end $$;
+revoke all on function public.update_my_qualifications(boolean, date, boolean, text) from public, anon;
+grant execute on function public.update_my_qualifications(boolean, date, boolean, text) to authenticated;
 
 -- When a roster entry gets linked to an app account, merge the account in:
 -- the sign-in email always wins; phone and photo fill in only if blank.
@@ -2406,3 +2443,42 @@ end $$;
 --
 -- Do the same later for the other 2–3 superusers once they have signed in.
 -- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- App settings (one row), changed by admins under More → App settings.
+--   teams_enabled  false hides Teams everywhere (nothing is deleted)
+--   rally_point    the Security Team Rally Location: where everyone goes on
+--                  an activation when Teams is off (and anyone not on a
+--                  team when it's on)
+-- ---------------------------------------------------------------------
+create table if not exists public.app_settings (
+  id            int primary key default 1 check (id = 1),
+  teams_enabled boolean not null default true,
+  rally_point   text not null default '',
+  updated_at    timestamptz not null default now(),
+  updated_by    uuid references public.profiles(id) on delete set null
+);
+insert into public.app_settings (id) values (1) on conflict (id) do nothing;
+alter table public.app_settings enable row level security;
+drop policy if exists app_settings_select on public.app_settings;
+create policy app_settings_select on public.app_settings for select to authenticated using (public.is_member());
+-- No direct writes: admins use save_app_settings.
+
+create or replace function public.save_app_settings(p_teams_enabled boolean, p_rally_point text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_admin() then raise exception 'Only admins can change app settings'; end if;
+  update public.app_settings
+     set teams_enabled = coalesce(p_teams_enabled, teams_enabled),
+         rally_point = left(trim(coalesce(p_rally_point, rally_point)), 200),
+         updated_at = now(), updated_by = auth.uid()
+   where id = 1;
+end $$;
+revoke all on function public.save_app_settings(boolean, text) from public, anon;
+grant execute on function public.save_app_settings(boolean, text) to authenticated;
+
+-- Live updates, so turning Teams on/off shows on open apps right away.
+do $$ begin
+  alter publication supabase_realtime add table public.app_settings;
+exception when duplicate_object then null; when undefined_object then null;
+end $$;
