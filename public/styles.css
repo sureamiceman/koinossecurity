@@ -99,8 +99,9 @@ main { flex: 1; padding: 14px 14px calc(90px + var(--safe-bottom)); max-width: 7
 .tabbar {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 10;
   background: var(--surface); border-top: 1px solid var(--border);
-  display: grid; grid-template-columns: repeat(8, 1fr);
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;   /* as many equal columns as there are tabs */
   padding-bottom: var(--safe-bottom);
+  touch-action: pan-y;   /* sideways swipes are ours (swipe between tabs) */
 }
 .tabbar a {
   display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 2px 9px;

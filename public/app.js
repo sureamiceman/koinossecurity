@@ -1262,10 +1262,10 @@
   const TABS = [
     ['alerts', 'Alerts', 'bell'],
     ['schedule', 'Schedule', 'calendar'],
-    ['board', 'Board', 'msg'],
-    ['attendance', 'Count', 'clipboard'],
     ['sops', 'SOPs', 'book'],
+    ['board', 'Board', 'msg'],
     ['contacts', 'Contacts', 'phone'],
+    ['attendance', 'Count', 'clipboard'],
     ['more', 'More', 'menu']
   ];
   function route() {
@@ -1277,6 +1277,26 @@
   const isLive = (b) => b.active && (!b.expires_at || new Date(b.expires_at).getTime() > Date.now());
   const unseenAlerts = () => state.data.bulletins.filter((b) => isLive(b) && new Date(b.created_at).getTime() > state.lastSeenAlerts).length;
   const pendingCount = () => state.data.profiles.filter((p) => p.role === 'pending').length;
+
+  // Swipe left / right on the bottom bar to move to the next / previous tab.
+  function swipeTabs(nav, activeTab) {
+    let x0 = null, y0 = 0, swiped = false;
+    nav.addEventListener('touchstart', (e) => { const t = e.touches[0]; x0 = t.clientX; y0 = t.clientY; swiped = false; }, { passive: true });
+    nav.addEventListener('touchend', (e) => {
+      if (x0 == null) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - x0, dy = t.clientY - y0;
+      x0 = null;
+      if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+      const i = TABS.findIndex(([k]) => k === activeTab);
+      const next = TABS[Math.min(TABS.length - 1, Math.max(0, i + (dx < 0 ? 1 : -1)))];
+      swiped = true;
+      if (next && next[0] !== activeTab) location.hash = '#/' + next[0];
+    }, { passive: true });
+    // A swipe that ends on a tab shouldn't also count as tapping it.
+    nav.addEventListener('click', (e) => { if (swiped) { e.preventDefault(); swiped = false; } }, true);
+    return nav;
+  }
 
   function mainView() {
     let [tab, id, sub] = route();
@@ -1308,11 +1328,11 @@
       viewAsBar(),
       updateBar(),
       h('main', {}, v.content),
-      h('nav', { class: 'tabbar', 'aria-label': 'Main' }, TABS.map(([key, label, ic]) => {
+      swipeTabs(h('nav', { class: 'tabbar', 'aria-label': 'Main' }, TABS.map(([key, label, ic]) => {
         const count = key === 'alerts' ? alertCount : key === 'more' ? moreCount : key === 'schedule' ? coverCount() + myAskedShifts().length : key === 'board' && activeTab !== 'board' ? unseenBoard() : key === 'attendance' ? openCountsCount() : 0;
         return h('a', { href: '#/' + key, class: activeTab === key ? 'active' : null, 'aria-current': activeTab === key ? 'page' : null },
           icon(ic), label, count ? h('span', { class: 'dot' }, count > 9 ? '9+' : count) : null);
-      })));
+      })), activeTab));
   }
 
   // ------------------------------------------------------------------

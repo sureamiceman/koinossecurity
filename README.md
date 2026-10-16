@@ -2,6 +2,7 @@
 
 Progressive Web App (PWA) for the Koinos church security team. It installs on iPhone and Android from the browser, with no app store involved.
 
+- **Bottom bar**: Alerts · Schedule · SOPs · Board · Contacts · Count · More, spread across the full width. Swipe left or right on the bar to move to the next or previous tab.
 - **Alerts**: safety bulletins and BOLOs with photos, priority (info / caution / urgent), optional expiry. New posts appear live on everyone's open app.
 - **Team board**: posts with replies and photos, live updates and an unread badge. Post types: general, *Ask for cover / offer a date to swap* (tied to one of your schedule posts: it marks it "Needs cover", and whoever taps *I'll cover* is put on the schedule automatically. Once the post no longer needs cover (covered, reassigned by an admin, or withdrawn) the request is taken off the board and deleted about an hour later; the schedule keeps the record, e.g. "Tim is covering for Tyler"), and welcome posts (created automatically when an admin links a new member's account). Threads are deleted 90 days after the last reply; admins can **Pin** a thread to keep it or **Make SOP** to turn it into a procedure.
 - **Push notifications**: each person turns them on under *More → Notifications* (iPhone: the app must be on the Home Screen). Alerts always notify; cover requests, new posts and replies can each be switched off. Sent by `netlify/functions/push.mjs`.
@@ -103,7 +104,7 @@ Mark each release in GitHub as a restore point: *Releases → Draft a new releas
 
 | Version | Feature | Pull request | Database undo |
 |---|---|---|---|
-| 1.20.0 | View as member; App settings (Teams on/off, Rally Location); CCW/medical at sign-up; Contacts as one simple list | (this PR) | `supabase/rollback/admin-tools-down.sql` |
+| 1.20.0 | View as member; App settings (Teams on/off, Rally Location); CCW/medical at sign-up; Contacts as one simple list; bottom bar order + swipe | (this PR) | `supabase/rollback/admin-tools-down.sql` |
 | 1.19.0 | Photos saved on each phone; schedule always 6 whole months ahead (nightly) | (this PR) | `supabase/rollback/schedule-horizon-down.sql` |
 | 1.18.0 | One Contacts tab (Team tab folded in), Medical tidy-up, Merge | (this PR) | none needed |
 | 1.17.0 | SOP pictures and links between SOPs | (this PR) | none needed (uses the existing photo storage) |
