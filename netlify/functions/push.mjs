@@ -116,15 +116,16 @@ async function loadContext(db, items) {
   const threadIds = [...new Set(items.replies.map((r) => r.post_id))];
   const inList = (ids) => `(${ids.map((x) => `"${x}"`).join(',')})`;
   const teamsNeeded = items.activations && items.activations.length;
-  const [profiles, subs, roster, threads, threadReplies, teams] = await Promise.all([
+  const [profiles, subs, roster, threads, threadReplies, teams, settings] = await Promise.all([
     db.get('profiles?select=id,full_name,role,notify_posts,notify_replies,notify_cover'),
     db.get('push_subscriptions?select=*'),
     db.get(teamsNeeded ? 'roster?select=name,profile_id,team_id&profile_id=not.is.null&active=is.true' : 'roster?select=name,profile_id&profile_id=not.is.null'),
     threadIds.length ? db.get(`posts?id=in.${inList(threadIds)}&select=id,author_id,kind`) : [],
     threadIds.length ? db.get(`post_replies?post_id=in.${inList(threadIds)}&select=post_id,author_id`) : [],
-    teamsNeeded ? db.get('teams?select=id,name,rally_point,sort_order&order=sort_order') : []
+    teamsNeeded ? db.get('teams?select=id,name,rally_point,sort_order&order=sort_order') : [],
+    teamsNeeded ? db.get('app_settings?select=teams_enabled,rally_point&id=eq.1').catch(() => []) : []   // optional until the database is updated
   ]);
-  return { profiles, subs, roster, threads, threadReplies, teams };
+  return { profiles, subs, roster, threads, threadReplies, teams, settings: (settings && settings[0]) || null };
 }
 
 // ----------------------------------------------------------------------
@@ -189,14 +190,23 @@ export function planDeliveries(items, ctx) {
 }
 
 // "Security Team is being ACTIVATED, please quickly move to {Rally Point}…"
-// People not on a team are sent to the first team's (Alpha's) Rally Point.
-export function activationMessage(a, profileId, ctx) {
+//   Teams off (App settings): everyone → the Security Team Rally Location.
+//   Teams on: your team's Rally Point; not on a team → the Security Team
+//   Rally Location, or the first team's (Alpha's) if that isn't set.
+export function rallyFor(profileId, ctx) {
+  const set = ctx.settings || {};
+  const teamWide = String(set.rally_point || '').trim();
   const teams = (ctx.teams || []).slice().sort((x, y) => x.sort_order - y.sort_order);
+  if (set.teams_enabled === false || !teams.length) return teamWide || 'the Security Team Rally Location';
   const r = ctx.roster.find((x) => x.profile_id === profileId);
   const team = r && teams.find((t) => t.id === r.team_id);
-  const where = team && team.rally_point ? `${team.rally_point} (${team.name} Team)`
+  return team && team.rally_point ? `${team.rally_point} (${team.name} Team)`
     : team ? `your ${team.name} Team rally point`
-      : teams[0] && teams[0].rally_point ? `${teams[0].rally_point} (${teams[0].name} Team)` : 'your team\'s rally point';
+      : teamWide ? teamWide
+        : teams[0] && teams[0].rally_point ? `${teams[0].rally_point} (${teams[0].name} Team)` : 'your team\'s rally point';
+}
+export function activationMessage(a, profileId, ctx) {
+  const where = rallyFor(profileId, ctx);
   let body = `Security Team is being ACTIVATED, please quickly move to ${where} to coordinate with the rest of the Security team.`;
   if (a.message) body += ` ${clip(a.message, 200)}`;
   return body;

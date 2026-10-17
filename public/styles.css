@@ -99,8 +99,9 @@ main { flex: 1; padding: 14px 14px calc(90px + var(--safe-bottom)); max-width: 7
 .tabbar {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 10;
   background: var(--surface); border-top: 1px solid var(--border);
-  display: grid; grid-template-columns: repeat(8, 1fr);
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;   /* as many equal columns as there are tabs */
   padding-bottom: var(--safe-bottom);
+  touch-action: pan-y;   /* sideways swipes are ours (swipe between tabs) */
 }
 .tabbar a {
   display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 2px 9px;
@@ -710,3 +711,17 @@ dialog .cbtns { margin-top: 14px; }
 .sop-panel .team-section .list.flat { margin: 8px -12px -14px; }
 .notice.twin { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0; padding: 6px 10px; }
 .sop-panel > .notice.block-btn { width: calc(100% - 24px); }
+
+/* ---------- View as member, sign-up "About you", declared qualifications ---------- */
+.view-as-bar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--info-bg); color: var(--info); border-bottom: 1px solid var(--border); position: sticky; top: calc(56px + var(--safe-top)); z-index: 8; }
+.view-as-bar .small { opacity: .85; }
+.view-as-card { margin-top: 12px; }
+fieldset.declare { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px 4px; margin: 4px 0 14px; }
+fieldset.declare legend { font-size: .85rem; font-weight: 700; color: var(--muted); padding: 0 4px; }
+.field.sub-field { margin-left: 26px; }
+.declared { margin-top: 4px; }
+.declared-notice { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; color: var(--text); background: var(--info-bg); }
+.field.check input[type=checkbox] { flex: none; }
+.contact-list .list-item { align-items: center; }
+.contact-count { text-align: center; margin-top: 10px; }
+.contact-row .avatar { background: var(--muted); cursor: default; }
