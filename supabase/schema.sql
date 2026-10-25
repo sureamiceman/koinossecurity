@@ -2219,6 +2219,31 @@ begin
   if not found then raise exception 'Only an admin can resend this.'; end if;
 end $$;
 
+-- Reopen a completed count to fix a mistake (anyone on the team), as long as
+-- nothing for that date has been emailed to the secretary yet. After the
+-- email has gone, only an admin's correction can change it.
+create or replace function public.attendance_reopen(p_count uuid) returns public.attendance_counts
+language plpgsql security definer set search_path = public as $$
+declare c public.attendance_counts;
+begin
+  if not public.is_member() then raise exception 'Not authorized'; end if;
+  select * into c from public.attendance_counts where id = p_count for update;
+  if not found then raise exception 'This count was removed.'; end if;
+  if c.status <> 'submitted' then return c; end if;
+  if exists (select 1 from public.attendance_counts x
+              where x.service_date = c.service_date and x.email_state in ('sent', 'sending')) then
+    raise exception 'The count for this date was already emailed to the secretary. Ask an admin to correct it.';
+  end if;
+  update public.attendance_counts
+     set status = 'open', email_state = 'none', email_error = '', submitted_by = null, submitted_at = null,
+         updated_at = now(), updated_by = auth.uid()
+   where id = c.id
+  returning * into c;
+  return c;
+end $$;
+revoke all on function public.attendance_reopen(uuid) from public, anon;
+grant execute on function public.attendance_reopen(uuid) to authenticated;
+
 revoke all on function public.attendance_save_setup(jsonb) from public, anon;
 revoke all on function public.attendance_total(uuid) from public, anon, authenticated;
 revoke all on function public.attendance_save(date, int, jsonb, text, boolean, boolean) from public, anon;

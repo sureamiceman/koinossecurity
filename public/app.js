@@ -1278,7 +1278,7 @@
   const unseenAlerts = () => state.data.bulletins.filter((b) => isLive(b) && new Date(b.created_at).getTime() > state.lastSeenAlerts).length;
   const pendingCount = () => state.data.profiles.filter((p) => p.role === 'pending').length;
 
-  // Swipe left / right on the bottom bar to move to the next / previous tab.
+  // Swipe on the bottom bar to move one tab in the direction of the swipe.
   function swipeTabs(nav, activeTab) {
     let x0 = null, y0 = 0, swiped = false;
     nav.addEventListener('touchstart', (e) => { const t = e.touches[0]; x0 = t.clientX; y0 = t.clientY; swiped = false; }, { passive: true });
@@ -1289,7 +1289,8 @@
       x0 = null;
       if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
       const i = TABS.findIndex(([k]) => k === activeTab);
-      const next = TABS[Math.min(TABS.length - 1, Math.max(0, i + (dx < 0 ? 1 : -1)))];
+      // Follows the thumb: swipe left → the tab to the left; swipe right → the tab to the right.
+      const next = TABS[Math.min(TABS.length - 1, Math.max(0, i + (dx < 0 ? -1 : 1)))];
       swiped = true;
       if (next && next[0] !== activeTab) location.hash = '#/' + next[0];
     }, { passive: true });
@@ -3716,7 +3717,7 @@
       case 'sent': return { text: `Emailed to the secretary ${relTime(c.emailed_at)}`, cls: 'ok' };
       case 'sending': return { text: 'Sending email…' };
       case 'pending': return pendingFor > 90000 ? { text: 'Email not sent yet', cls: 'bad', retry: 'send' } : { text: 'Sending email…' };
-      case 'waiting': return { text: 'Will be emailed once every service for this date is submitted', retry: isAdmin() ? 'now' : null };
+      case 'waiting': return { text: 'Complete. Goes to the secretary with the last service (Complete and send).', retry: isAdmin() ? 'now' : null };
       case 'failed': return { text: 'Email not sent: ' + (c.email_error || 'unknown problem'), cls: 'bad', retry: (isAdmin() || c.submitted_by === state.profile.id) ? 'resend' : null };
       default: return null;
     }
@@ -3804,12 +3805,12 @@
       } else {
         dayTotal += c.total;
         submitted++;
-        badge = h('span', { class: 'badge ok-badge' }, 'Submitted');
-        lines.push(`Total ${c.total} · submitted by ${nameOf(c.submitted_by) || 'someone'}, ${fmtDateTime(c.submitted_at)}`);
+        badge = h('span', { class: 'badge ok-badge' }, doneWord());
+        lines.push(`Total ${c.total} · ${doneBy().toLowerCase()} by ${nameOf(c.submitted_by) || 'someone'}, ${fmtDateTime(c.submitted_at)}`);
         if (c.corrections) lines.push(`Corrected by ${nameOf(c.corrected_by) || 'an admin'}, ${fmtDateTime(c.corrected_at)}`);
         const em = emailStatus(c);
         if (em) lines.push(h('span', { class: em.cls === 'bad' ? 'error-text' : em.cls === 'ok' ? 'ok-text' : '' }, em.text));
-        btn = h('button', { class: 'btn block submitted-btn', onclick: go }, '✓ Submitted Count');
+        btn = h('button', { class: 'btn block submitted-btn', onclick: go }, dailyEmail() ? '✓ Completed Count' : '✓ Submitted Count');
       }
       content.push(h('div', { class: 'card att-service' },
         h('div', { class: 'row' },
@@ -3921,7 +3922,7 @@
     const groups = countGroups(c);
     const content = [];
     if (correcting) content.push(h('div', { class: 'notice' }, 'You are correcting a submitted count. Nothing changes until you tap Save correction.'));
-    else content.push(h('p', { class: 'muted small att-intro' }, `Started by ${nameOf(c.started_by) || 'someone'}. Numbers save automatically, so anyone on the team can pick this up. Tap Submit when every area is counted.`));
+    else content.push(h('p', { class: 'muted small att-intro' }, `Started by ${nameOf(c.started_by) || 'someone'}. Numbers save automatically, so anyone on the team can pick this up. Tap ${submitLabel(c)} when every area is counted.`));
 
     groups.forEach((g, gi) => {
       content.push(h('div', { class: 'card att-section' },
@@ -3982,7 +3983,7 @@
             h('label', { class: 'att-email-check' }, emailBox, 'Email it'),
             h('button', { class: 'btn small', onclick: () => { state.att.correcting = null; clearDraft(c.id); render(); } }, 'Cancel'),
             h('button', { class: 'btn small primary', onclick: (e) => saveCorrection(c, emailBox.checked, e.currentTarget) }, 'Save correction'))
-          : h('button', { class: 'btn primary', onclick: () => confirmSubmit(c) }, 'Submit'))));
+          : h('button', { class: 'btn primary', onclick: () => confirmSubmit(c) }, submitLabel(c)))));
     return content;
   }
 
@@ -4045,24 +4046,61 @@
     }
   }
 
+  // "Once a day" email (Count → Set up → When): earlier services tap Complete
+  // (and can still fix it until the email goes); the last service on the form
+  // taps "Complete and send", which emails every service for the date at once.
+  const dailyEmail = () => attSettings().email_when === 'day' && (attSettings().recipients || []).length > 0;
+  const finalServiceNo = () => { const n = (attSettings().services || []).map((x) => Number(x.no)); return n.length ? Math.max(...n) : null; };
+  const isFinalService = (c) => c.service_no === finalServiceNo();
+  const dayEmailed = (date) => state.data.attendance_counts.some((x) => x.service_date === date && (x.email_state === 'sent' || x.email_state === 'sending'));
+  const othersWaiting = (c) => (attSettings().services || []).filter((x) => Number(x.no) !== c.service_no
+    && !state.data.attendance_counts.some((y) => y.service_date === c.service_date && y.service_no === Number(x.no) && y.status === 'submitted')).map((x) => x.label);
+  const submitLabel = (c) => (!dailyEmail() ? 'Submit' : isFinalService(c) ? 'Complete and send' : dayEmailed(c.service_date) ? 'Complete and send update' : 'Complete');
+  const doneWord = () => (dailyEmail() ? 'Complete' : 'Submitted');
+  const doneBy = () => (dailyEmail() ? 'Completed' : 'Submitted');
+  const canReopen = (c) => c.status === 'submitted' && !dayEmailed(c.service_date);
+
   function confirmSubmit(c) {
     const t = computeTotals(c);
     const blank = t.lines - t.filled;
     const st = attSettings();
-    const emailing = (st.recipients || []).length
-      ? (st.email_when === 'day' ? 'It will be emailed to the secretary once every service for this date is submitted.' : 'It will be emailed to the secretary.')
-      : 'No secretary email is set up yet, so it will be saved but not emailed.';
+    const daily = dailyEmail();
+    const final = daily && isFinalService(c);
+    const missing = final ? othersWaiting(c) : [];
+    const label = submitLabel(c);
+    const emailing = !(st.recipients || []).length ? 'No secretary email is set up yet, so it will be saved but not emailed.'
+      : !daily ? 'It will be emailed to the secretary.'
+        : final ? (missing.length ? null : 'This sends one email to the secretary with every service and the total for the day.')
+          : dayEmailed(c.service_date) ? 'Today\'s email already went to the secretary without this service, so completing it sends an updated email.'
+            : `Nothing is emailed yet. It goes to the secretary, together with the other services, when ${((st.services || []).find((x) => Number(x.no) === finalServiceNo()) || {}).label || 'the last service'} taps Complete and send. Until then you can still fix it.`;
+    if (final && missing.length) {
+      // The last service is sending, but an earlier one isn't marked Complete.
+      openDialog({
+        title: `${missing.join(' and ')} not completed`,
+        body: [
+          h('div', { class: 'notice urgent-notice' }, `${missing.join(' and ')} ${missing.length > 1 ? "haven't" : "hasn't"} been marked Complete, so ${missing.length > 1 ? 'those counts' : 'that count'} would be missing from the email to the secretary.`),
+          h('div', { class: 'att-confirm-total' }, h('div', { class: 'muted small' }, `${serviceName(c.service_date, c.service_no)} total`), h('strong', {}, t.total)),
+          blank ? h('p', { class: 'notice' }, `${blank} line${blank > 1 ? 's are' : ' is'} blank and will count as 0.`) : null,
+          h('p', { class: 'body-text' }, `Cancel to have ${missing.join(' and ')} finish and tap Complete, then come back and tap Complete and send. Or send now without ${missing.length > 1 ? 'them' : 'it'}.`)
+        ],
+        buttons: (close) => [
+          h('button', { class: 'btn', onclick: close }, 'Cancel'),
+          h('button', { class: 'btn danger', onclick: async (e) => { e.currentTarget.disabled = true; close(); await submitCount(c); } }, `Send without ${missing.length > 1 ? 'them' : missing[0]}`)
+        ]
+      });
+      return;
+    }
     openDialog({
-      title: `Submit ${serviceName(c.service_date, c.service_no)}?`,
+      title: `${label} ${serviceName(c.service_date, c.service_no)}?`,
       body: [
         h('div', { class: 'att-confirm-total' }, h('div', { class: 'muted small' }, 'Service total'), h('strong', {}, t.total)),
         blank ? h('p', { class: 'notice' }, `${blank} line${blank > 1 ? 's are' : ' is'} blank and will count as 0.`) : null,
         h('p', { class: 'body-text' }, emailing),
-        h('p', { class: 'muted small' }, 'After submitting, only an admin can change it.')
+        h('p', { class: 'muted small' }, daily ? 'Once the email has gone to the secretary, only an admin can change it.' : 'After submitting, only an admin can change it.')
       ],
       buttons: (close) => [
         h('button', { class: 'btn', onclick: close }, 'Keep counting'),
-        h('button', { class: 'btn primary', onclick: async (e) => { e.currentTarget.disabled = true; close(); await submitCount(c); } }, 'Submit')
+        h('button', { class: 'btn primary', onclick: async (e) => { e.currentTarget.disabled = true; close(); await submitCount(c); } }, label)
       ]
     });
   }
@@ -4078,14 +4116,15 @@
     }
     clearDraft(c.id);
     location.hash = '#/attendance/' + c.service_date;
-    toast('Submitted. Sending to the secretary…', 4000);
+    const willSend = !dailyEmail() || isFinalService(c) || dayEmailed(c.service_date);
+    toast(willSend ? `${doneWord()}. Sending to the secretary…` : 'Complete. Saving…', 4000);
     const res = await attEmail(c.id);
     toast(emailToast(res), 6000);
   }
 
   function emailToast(res) {
-    if (res.state === 'sent') return 'Submitted and emailed to the secretary';
-    if (res.state === 'waiting') return 'Submitted. It will be emailed once every service for this date is in.';
+    if (res.state === 'sent') return `${doneWord()} and emailed to the secretary`;
+    if (res.state === 'waiting') return 'Complete. It goes to the secretary when the last service taps Complete and send.';
     if (res.state === 'no_recipients') return 'Submitted. No secretary email is set up yet, so nothing was emailed.';
     if (res.state === 'offline') return 'Submitted. The email will go out when the app is back online.';
     return 'Submitted, but the email didn\'t go out' + (res.error ? `: ${res.error}` : '') + '. An admin can resend it.';
@@ -4153,8 +4192,8 @@
       h('div', { class: 'card att-summary' },
         h('div', { class: 'row' },
           h('div', { class: 'grow' }, h('div', { class: 'muted small' }, 'Service total'), h('div', { class: 'att-big' }, c.total)),
-          h('span', { class: 'badge ok-badge' }, 'Submitted')),
-        h('div', { class: 'meta' }, `Submitted by ${nameOf(c.submitted_by) || 'someone'}, ${fmtDateTime(c.submitted_at)}`),
+          h('span', { class: 'badge ok-badge' }, doneWord())),
+        h('div', { class: 'meta' }, `${doneBy()} by ${nameOf(c.submitted_by) || 'someone'}, ${fmtDateTime(c.submitted_at)}`),
         c.corrections ? h('div', { class: 'meta' }, `Corrected by ${nameOf(c.corrected_by) || 'an admin'}, ${fmtDateTime(c.corrected_at)}`) : null,
         em ? h('div', { class: 'meta ' + (em.cls === 'bad' ? 'error-text' : em.cls === 'ok' ? 'ok-text' : '') }, em.text) : null,
         em && em.retry ? h('div', { class: 'actions' }, h('button', { class: 'btn small', onclick: (e) => retryEmail(c, em.retry, e.currentTarget) }, em.retry === 'now' ? 'Send now' : 'Try again')) : null)
@@ -4167,6 +4206,11 @@
           h('strong', { class: 'att-value' }, f.value == null ? '–' : f.value)))));
     });
     if (c.notes) content.push(h('div', { class: 'card' }, h('div', { class: 'muted small' }, 'Notes'), h('p', { class: 'body-text' }, c.notes)));
+    if (canReopen(c)) {
+      content.push(h('div', { class: 'card' },
+        h('p', { class: 'body-text' }, 'Spotted a mistake? You can reopen this count and fix it until it\'s emailed to the secretary. Tap Complete again when you\'re done.'),
+        h('button', { class: 'btn', onclick: (e) => reopenCount(c, e.currentTarget) }, 'Reopen to fix')));
+    }
     if (isAdmin()) {
       content.push(h('div', { class: 'actions' },
         h('button', { class: 'btn', onclick: () => { state.att.correcting = c.id; clearDraft(c.id); render(); } }, 'Correct count'),
@@ -4174,6 +4218,15 @@
         h('button', { class: 'btn danger', onclick: () => deleteCount(c) }, 'Delete')));
     }
     return content;
+  }
+
+  async function reopenCount(c, btn) {
+    if (btn) btn.disabled = true;
+    const { error } = await sb.rpc('attendance_reopen', { p_count: c.id });
+    if (error) { toast(friendlyError(error), 6000); if (btn) btn.disabled = false; await refreshTable('attendance_counts'); render(); return; }
+    await Promise.all([refreshTable('attendance_counts'), refreshTable('attendance_values')]);
+    render();
+    toast('Reopened. Fix it, then tap ' + submitLabel(c) + '.', 5000);
   }
 
   async function retryEmail(c, kind, btn) {
@@ -4247,7 +4300,7 @@
     content.push(h('div', { class: 'section-title' }, 'Email to the secretary'));
     const when = h('select', { id: 'as_when', class: 'input' },
       h('option', { value: 'each' }, 'After each service'),
-      h('option', { value: 'day' }, 'Once all services that day are in'));
+      h('option', { value: 'day' }, 'Once a day: earlier services tap Complete, the last one taps Complete and send'));
     when.value = m.email_when;
     when.addEventListener('change', () => { m.email_when = when.value; markDirty(); });
     content.push(h('div', { class: 'card' },
@@ -4255,7 +4308,7 @@
         textIn('as_rcpt', m.recipients, (v) => { m.recipients = v; }, { type: 'email', inputmode: 'email', placeholder: 'secretary@example.org', multiple: true }),
         h('div', { class: 'hint' }, 'Separate more than one address with commas.')),
       h('div', { class: 'field' }, h('label', { for: 'as_when' }, 'When'), when,
-        h('div', { class: 'hint' }, 'Each email shows every service submitted for that date so far, plus the day total.')),
+        h('div', { class: 'hint' }, 'Each email shows every service for that date, plus the day total. In once-a-day mode, a completed count can be reopened and fixed until the email goes; if an earlier service isn\'t complete when the last one sends, the app warns first.')),
       h('div', { class: 'field' }, h('label', { for: 'as_reply' }, 'Replies go to (optional)'),
         textIn('as_reply', m.reply_to, (v) => { m.reply_to = v; }, { type: 'email', inputmode: 'email', placeholder: 'Blank = whoever submitted the count' }))));
 
