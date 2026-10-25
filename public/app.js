@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [], app_settings: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [], app_settings: [], background_checks: [] });
   const state = {
     session: null,
     profile: null,
@@ -32,7 +32,8 @@
     lastSeenAlerts: 0,
     att: { weeks: 8, drafts: {}, timer: null, inflight: null, correcting: null, setup: null, setupDirty: false, emailTried: {} },
     attMissing: false,
-    viewAsMember: false
+    viewAsMember: false,
+    myBgOk: true
   };
 
   const ROLE_LABELS = { pending: 'Pending approval', member: 'Member', admin: 'Admin', superuser: 'Superuser' };
@@ -41,6 +42,9 @@
   // member, hiding every admin tool. The database still knows you're an admin.
   const role = () => { const r = realRole(); return state.viewAsMember && (r === 'admin' || r === 'superuser') ? 'member' : r; };
   const realAdmin = () => ['admin', 'superuser'].includes(realRole());
+  // Office Admin (the church office): an extra flag on top of any role. Sees and
+  // sets background checks. Hidden while an admin uses "View as member".
+  const isOfficeAdmin = () => !state.viewAsMember && isMember() && !!(state.profile && state.profile.is_office_admin);
   const isMember = () => ['member', 'admin', 'superuser'].includes(role());
   const isAdmin = () => ['admin', 'superuser'].includes(role());
   const isSuper = () => role() === 'superuser';
@@ -148,6 +152,33 @@
     return (name || '?').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
   }
   const telHref = (p) => 'tel:' + String(p).replace(/[^0-9+*#,;]/g, '');
+  // US phone numbers always show as (555) 123-4567 (anything else is shown as typed).
+  function fmtPhone(p) {
+    const raw = String(p || '').trim();
+    let d = raw.replace(/\D/g, '');
+    if (d.length === 11 && d[0] === '1') d = d.slice(1);
+    return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : raw;
+  }
+  // While typing: 5551234567 → (555) 123-4567, a digit at a time.
+  function fmtPhoneTyping(v) {
+    let d = String(v || '').replace(/\D/g, '');
+    if (d.length > 10 && d[0] === '1') d = d.slice(1);
+    if (d.length > 10) return v;   // longer (extension, international): leave as typed
+    if (d.length < 4) return d.length ? `(${d}` : '';
+    if (d.length < 7) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
+    return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  }
+  function phoneInput(input) {
+    input.addEventListener('input', (e) => {
+      if (e.inputType && e.inputType.startsWith('delete')) return;   // let backspace work naturally
+      const atEnd = input.selectionStart === input.value.length;
+      const next = fmtPhoneTyping(input.value);
+      if (next !== input.value) { input.value = next; if (atEnd) input.setSelectionRange(next.length, next.length); }
+    });
+    input.addEventListener('blur', () => { input.value = fmtPhone(input.value); });
+    if (input.value) input.value = fmtPhone(input.value);
+    return input;
+  }
   const smsHref = (p) => 'sms:' + String(p).replace(/[^0-9+]/g, '');
   const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e || '');
 
@@ -445,12 +476,14 @@
     attendance_values: (t) => t.select('*, attendance_counts!inner(service_date)').gte('attendance_counts.service_date', attSince()),
     teams: (t) => t.select('*').order('sort_order'),
     team_activations: (t) => t.select('*').order('created_at', { ascending: false }).limit(10),
-    app_settings: (t) => t.select('*')
+    app_settings: (t) => t.select('*'),
+    background_checks: (t) => t.select('*')   // only admins and Office Admins get rows
   };
   const attSince = () => isoDay(new Date(Date.now() - 200 * 864e5));
-  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'app_settings', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
+  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'app_settings', 'background_checks', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
 
   function loadCachedData() {
+    if (cacheGet('myBgOk') === false) state.myBgOk = false;
     for (const t of Object.keys(QUERIES)) {
       const rows = cacheGet('data:' + t);
       if (Array.isArray(rows)) state.data[t] = rows;
@@ -474,6 +507,8 @@
       try { await sb.rpc('extend_series'); } catch { /* offline */ }
     }
     const results = await Promise.all(Object.keys(QUERIES).map(async (t) => [t, await refreshTable(t)]));
+    // Can I take posts? (background check). Unknown/offline = keep what we knew.
+    try { const { data, error } = await sb.rpc('my_background_ok'); if (!error && typeof data === 'boolean') { state.myBgOk = data; cacheSet('myBgOk', data); } } catch { /* offline */ }
     // Attendance tables missing = the database hasn't been updated yet; the rest of the app still works.
     if (results.some(([t, e]) => e && t.startsWith('attendance') && /does not exist|schema cache|could not find/i.test(e.message || ''))) state.attMissing = true;
     const errors = results.filter(([t, e]) => e && !OPTIONAL_TABLES.has(t)).map(([, e]) => e);
@@ -902,8 +937,9 @@
         else input = h('input', { type: f.type || 'text', id, autocomplete: f.autocomplete || 'off', inputmode: f.inputmode, placeholder: f.placeholder, list: f.list ? id + '_list' : null });
         const v = values[f.name];
         input.value = v != null ? v : (f.default != null ? f.default : (f.type === 'select' ? f.options[0][0] : ''));
+        if (f.type === 'tel') { phoneInput(input); input.setAttribute('placeholder', f.placeholder || '(555) 555-5555'); }
         getters[f.name] = () => f.type === 'number' ? Number(input.value || 0)
-          : f.type === 'password' ? input.value : input.value.trim();
+          : f.type === 'password' ? input.value : f.type === 'tel' ? fmtPhone(input.value) : input.value.trim();
         getters[f.name].el = input;
         wrap = h('div', { class: 'field' },
           h('label', { for: id }, f.label + (f.required ? ' *' : '')), f.rich ? formatBar(input) : null, input,
@@ -1003,7 +1039,7 @@
       ccw.checked = !!p.requires_ccw;
       const who = h('select', { class: 'pe-who', 'aria-label': f.personLabel || 'Default person' },
         h('option', { value: '' }, f.openLabel || 'Open'),
-        people.map((r) => h('option', { value: r.id }, r.name + (r.ccw_qualified && (!r.ccw_expires_on || daysUntil(r.ccw_expires_on) >= 0) ? ' · CCW' : ''))));
+        people.map((r) => h('option', { value: r.id, disabled: !bgCleared(r) && r.id !== p.roster_id }, r.name + (r.ccw_qualified && (!r.ccw_expires_on || daysUntil(r.ccw_expires_on) >= 0) ? ' · CCW' : '') + (bgCleared(r) ? '' : ` (check ${BG_LABELS[bgStatus(r)]})`))));
       who.value = p.roster_id || '';
       const warn = h('div', { class: 'pe-warn hidden' });
       const check = () => {
@@ -1303,14 +1339,15 @@
     let [tab, id, sub] = route();
     if ((tab === 'users' || tab === 'assignments') && !isAdmin()) tab = 'more';
     if (tab === 'attendance-setup' && !isAdmin()) tab = 'attendance';
+    if (tab === 'background' && !(isAdmin() || isOfficeAdmin())) tab = 'more';
     if (tab === 'teams' && (!isAdmin() || !teamsEnabled())) tab = 'contacts';
     if (tab === 'team') {   // the old Team tab: now Contacts → Security Team
       tab = 'contacts'; state.contactQuery = '';
       history.replaceState(null, '', '#/contacts');
     }
-    const views = { alerts: alertsView, schedule: scheduleView, confirm: confirmView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView, teams: teamsAdminView, activation: activationView };
+    const views = { alerts: alertsView, schedule: scheduleView, confirm: confirmView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView, teams: teamsAdminView, activation: activationView, background: backgroundView };
     const v = (views[tab] || alertsView)(id, sub);
-    const activeTab = tab === 'users' ? 'more' : (tab === 'assignments' || tab === 'confirm') ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : tab === 'teams' ? 'contacts' : tab === 'activation' ? 'alerts' : (views[tab] ? tab : 'alerts');
+    const activeTab = (tab === 'users' || tab === 'background') ? 'more' : (tab === 'assignments' || tab === 'confirm') ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : tab === 'teams' ? 'contacts' : tab === 'activation' ? 'alerts' : (views[tab] ? tab : 'alerts');
 
     if (activeTab === 'alerts') {
       state.lastSeenAlerts = Date.now();
@@ -1755,9 +1792,9 @@
     return h('a', { class: `cbtn cbtn-${kind}`, href, 'aria-label': label, title: label },
       icon({ call: 'phone', text: 'msg', email: 'mail' }[kind]), tag ? h('span', { class: 'cbtn-tag', 'aria-hidden': 'true' }, tag) : null);
   }
-  const callBtn = (phone, alt, who) => contactBtn('call', telHref(phone), `${alt ? 'Call alternate number' : 'Call'}${who ? ' ' + who : ''} (${phone})`, alt ? '2' : null);
+  const callBtn = (phone, alt, who) => contactBtn('call', telHref(phone), `${alt ? 'Call alternate number' : 'Call'}${who ? ' ' + who : ''} (${fmtPhone(phone)})`, alt ? '2' : null);
   // Opens the phone's own messaging app, addressed to this number.
-  const textBtn = (phone, who) => contactBtn('text', smsHref(phone), `Text${who ? ' ' + who : ''} (${phone})`);
+  const textBtn = (phone, who) => contactBtn('text', smsHref(phone), `Text${who ? ' ' + who : ''} (${fmtPhone(phone)})`);
   const emailBtn = (email, who) => contactBtn('email', 'mailto:' + email, `Email${who ? ' ' + who : ''} (${email})`);
   // The row of buttons for one person or contact.
   const reachBtns = ({ phone, alt_phone, email, name }) => {
@@ -1777,7 +1814,7 @@
       h('div', { class: 'grow' },
         h('div', { class: 'title' }, c.name),
         c.organization ? h('div', { class: 'sub' }, c.organization) : null,
-        c.phone ? h('div', { class: 'sub' }, c.phone + (c.alt_phone ? ' · ' + c.alt_phone : '')) : null,
+        c.phone ? h('div', { class: 'sub' }, fmtPhone(c.phone) + (c.alt_phone ? ' · ' + fmtPhone(c.alt_phone) : '')) : null,
         c.notes ? richText(c.notes, 'sub body-text') : null,
         isAdmin() && rosterTwin(c) ? h('div', { class: 'notice twin' }, `Looks like ${rosterTwin(c).name} from the Security Team.`,
           h('button', { class: 'btn small', onclick: () => mergeContact(c, rosterTwin(c)) }, 'Merge')) : null,
@@ -1795,10 +1832,11 @@
           r.is_medical ? h('span', { class: 'badge medical inline' }, 'Medical') : null,
           c ? h('span', { class: 'badge inline ' + c.cls }, c.label) : null,
           !r.active ? h('span', { class: 'badge inline muted-badge' }, 'Inactive') : null,
+          bgBadge(r),
           t ? [' ', teamChip(t)] : null),
         r.is_medical && r.medical_notes ? h('div', { class: 'sub med-notes' }, r.medical_notes) : null,
         r.position ? h('div', { class: 'sub' }, r.position) : null,
-        h('div', { class: 'sub' }, r.phone || 'No phone listed')),
+        h('div', { class: 'sub' }, r.phone ? fmtPhone(r.phone) : 'No phone listed')),
       reachBtns({ phone: r.phone, name: r.name }));
   }
   const byName = (a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name);
@@ -1881,6 +1919,63 @@
   }
   const fmtDay = (s) => dateOnly(s).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
 
+  // ---- Background checks (seen by admins and Office Admins only) ----
+  const BG_LABELS = { open: 'Open', complete: 'Complete', denied: 'Denied' };
+  const bgFeature = () => state.data.background_checks.length > 0;   // database updated (and allowed to see)
+  const canSeeBg = () => (isAdmin() || isOfficeAdmin()) && bgFeature();
+  const bgStatus = (r) => ((r && state.data.background_checks.find((b) => b.roster_id === r.id)) || {}).status || 'open';
+  const bgCleared = (r) => !bgFeature() || bgStatus(r) === 'complete';
+  const bgBadge = (r, always) => {
+    if (!canSeeBg() || !r) return null;
+    const st = bgStatus(r);
+    if (st === 'complete' && !always) return null;
+    return h('span', { class: 'badge inline ' + (st === 'complete' ? 'ok-badge' : st === 'denied' ? 'urgent' : 'caution'), title: 'Background check' }, 'Check: ' + BG_LABELS[st]);
+  };
+  async function setBackgroundCheck(r, status) {
+    const { error } = await sb.rpc('set_background_check', { p_roster: r.id, p_status: status });
+    if (error) { toast(friendlyError(error), 5000); return false; }
+    await refreshTable('background_checks');
+    render();
+    toast(`${r.name}: background check ${BG_LABELS[status]}`);
+    return true;
+  }
+  function bgPicker(r) {
+    const sel = h('select', { class: 'input small-select', 'aria-label': `Background check for ${r.name}` },
+      Object.entries(BG_LABELS).map(([v, l]) => h('option', { value: v }, l)));
+    sel.value = bgStatus(r);
+    sel.addEventListener('change', async () => {
+      const prev = bgStatus(r);
+      if (sel.value === 'denied' && !confirm(`Mark ${r.name}'s background check as Denied? They won't be able to be scheduled.`)) { sel.value = prev; return; }
+      if (!(await setBackgroundCheck(r, sel.value))) sel.value = prev;
+    });
+    return sel;
+  }
+
+  // #/background — the church office's list (admins can look, only Office Admins change).
+  function backgroundView() {
+    const people = state.data.roster.slice().sort((a, b) => (b.active - a.active) || a.name.localeCompare(b.name));
+    const pending = people.filter((r) => r.active && bgStatus(r) !== 'complete');
+    const showAll = state.bgShowAll || !pending.length;
+    const chip = (all, label) => h('button', { class: 'chip' + (showAll === all ? ' on' : ''), onclick: () => { state.bgShowAll = all; render(); } }, label);
+    const rows = showAll ? people : pending;
+    const content = [
+      h('p', { class: 'muted small' }, isOfficeAdmin()
+        ? 'Mark each Security Team member Complete once their background check is done. Until then they can use the app but can\'t be put on the schedule (assigned, volunteer or cover). Only admins and the church office see this.'
+        : 'Only the church office (Office Admins) can change these. Until someone is Complete they can\'t be put on the schedule.'),
+      h('div', { class: 'chips' }, chip(false, `Needs attention (${pending.length})`), chip(true, `Everyone (${people.length})`))
+    ];
+    if (!bgFeature()) content.push(h('div', { class: 'notice' }, 'The database needs updating first: run supabase/schema.sql in the Supabase SQL editor.'));
+    content.push(rows.length ? h('div', { class: 'list' }, rows.map((r) => {
+      const b = state.data.background_checks.find((x) => x.roster_id === r.id);
+      return h('div', { class: 'list-item bg-row' + (r.active ? '' : ' inactive') },
+        h('div', { class: 'grow' },
+          h('div', { class: 'title' }, r.name, !r.active ? h('span', { class: 'badge inline muted-badge' }, 'Inactive') : null),
+          h('div', { class: 'sub' }, b && b.updated_by ? `${BG_LABELS[bgStatus(r)]} · set by ${nameOf(b.updated_by) || 'the office'} ${relTime(b.updated_at)}` : BG_LABELS[bgStatus(r)])),
+        isOfficeAdmin() ? bgPicker(r) : bgBadge(r, true));
+    })) : empty('Everyone on the team is Complete.', 'users'));
+    return { title: 'Background checks', back: '#/more', content };
+  }
+
   function ccwStatus(p) {
     if (!p.ccw_qualified) return null;
     const d = daysUntil(p.ccw_expires_on);
@@ -1938,7 +2033,11 @@
         c ? h('div', { class: 'card' },
           h('span', { class: 'badge ' + c.cls }, c.label === 'CCW' ? 'CCW qualified' : c.label),
           h('div', { class: 'body-text' }, c.detail)) : null,
-        p.phone ? h('div', { class: 'meta' }, p.phone) : null,
+        canSeeBg() ? h('div', { class: 'card bg-card' }, h('div', { class: 'row' },
+          h('div', { class: 'grow' }, h('strong', {}, 'Background check: '), BG_LABELS[bgStatus(p)],
+            bgStatus(p) !== 'complete' ? h('div', { class: 'muted small' }, "Can't be put on the schedule until it's Complete.") : null),
+          isOfficeAdmin() ? bgPicker(p) : null)) : null,
+        p.phone ? h('div', { class: 'meta' }, fmtPhone(p.phone)) : null,
         p.email ? h('div', { class: 'meta' }, p.email) : null,
         reachBtns({ phone: p.phone, email: p.email, name: p.name })
       ],
@@ -2323,6 +2422,7 @@
     const v = scheduleViewInner();
     const banner = confirmBanner();
     if (banner) v.content = [banner, ...[].concat(v.content)];
+    if (!state.myBgOk && myRoster()) v.content = [h('div', { class: 'notice' }, "You can see the schedule, but you can't volunteer, cover or be assigned until your background check is complete. The church office will mark it when it's done."), ...[].concat(v.content)];
     return v;
   }
 
@@ -2487,7 +2587,9 @@
     const answerable = mine && upcoming && !s.cover_requested && (s.confirm_state === 'asked' || (s.confirm_state === 'none' && shiftStart(s, e) - Date.now() < 7 * 864e5));
     if (answerable) actions.push(h('button', { class: 'btn small primary', onclick: () => confirmMine(s) }, 'Confirm'));
     if (upcoming && me) {
-      if (!s.roster_id) {
+      if (!state.myBgOk && (!s.roster_id || (s.cover_requested && !mine))) {
+        // Background check not Complete: can't take posts (the schedule tab explains).
+      } else if (!s.roster_id) {
         actions.push(h('button', { class: 'btn small primary', onclick: () => shiftAction('volunteer_shift', { p_shift: s.id }, `Volunteer for ${s.post || 'this post'} at ${e.title}?` + ccwNote, "You're on the schedule — thanks!") }, 'Volunteer'));
       // One way to ask for cover: a board post tied to this shift (this is a shortcut to it).
       } else if (mine && !s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => newPost('swap', s.id) }, 'Need cover'));
@@ -2506,6 +2608,7 @@
           assigned ? avatar(assigned) : h('span', { class: 'avatar open', 'aria-hidden': 'true' }, '?'),
           s.roster_id ? h('span', { class: 'person-name' + (notCcw ? ' ccw-miss' : '') }, rosterName(s.roster_id) + (mine ? ' (you)' : '')) : h('span', { class: 'badge caution' }, 'Open'),
           notCcw ? noCcwBadge() : null,
+          isAdmin() && assigned && !bgCleared(assigned) ? h('span', { class: 'badge urgent', title: "Assigned before their background check was marked Complete. Reassign, or ask the church office." }, 'Check ' + BG_LABELS[bgStatus(assigned)]) : null,
           s.cover_requested ? h('span', { class: 'badge urgent' }, 'Needs cover') : null,
           s.roster_id && !s.cover_requested && upcoming ? confirmBadge(s) : null,
           isAdmin() && upcoming && assigned && !assigned.profile_id && 'confirm_state' in s && shiftStart(s, e) - Date.now() < 4 * 864e5
@@ -2823,7 +2926,7 @@
       fields: [
         { name: 'post', label: 'Post', required: true, placeholder: 'e.g. Parking lot', list: knownPosts() },
         { name: 'requires_ccw', label: 'CCW-qualified team member preferred', type: 'checkbox', hint: 'Anyone can still be assigned, volunteer or cover; someone without a current CCW is flagged in red.' },
-        { name: 'roster_id', label: 'Assigned to', type: 'select', options: [['', 'Open — needs a volunteer'], ...people.map((r) => [r.id, r.name + (ccwOkOn(r, e.starts_at) ? ' · CCW' : '')])] },
+        { name: 'roster_id', label: 'Assigned to', type: 'select', options: [['', 'Open — needs a volunteer'], ...people.map((r) => [r.id, r.name + (ccwOkOn(r, e.starts_at) ? ' · CCW' : '') + (bgCleared(r) ? '' : ` · check ${BG_LABELS[bgStatus(r)]}`)])] },
         { name: 'start', label: 'Start (optional)', type: 'time', hint: `Leave both times blank to use the event time (${timeRange(new Date(e.starts_at), new Date(e.ends_at))}).` },
         { name: 'end', label: 'End (optional)', type: 'time' },
         { name: 'note', label: 'Note', placeholder: 'e.g. Bring radio, meet at east door' },
@@ -2832,6 +2935,10 @@
       ],
       onSubmit: async (v) => {
         if (!!v.start !== !!v.end) throw new Error('Enter both a start and end time, or leave both blank.');
+        if (v.roster_id && v.roster_id !== s.roster_id) {
+          const who = state.data.roster.find((x) => x.id === v.roster_id);
+          if (who && !bgCleared(who)) throw new Error(`${who.name} can't be put on the schedule until their background check is Complete (it's ${BG_LABELS[bgStatus(who)]}).`);
+        }
         if (v.requires_ccw && v.roster_id) {
           const r = state.data.roster.find((x) => x.id === v.roster_id);
           if (!ccwOkOn(r, e.starts_at)) toast(`${r.name} isn't CCW-qualified on this date; the post will be flagged.`, 5000);
@@ -3028,7 +3135,7 @@
     const when = new Date(s.starts_at || e.starts_at);
     const mineReq = p.author_id === state.profile.id;
     const actions = [];
-    if (st.open && me && !mineReq && s.roster_id !== me.id) {
+    if (st.open && me && !mineReq && s.roster_id !== me.id && state.myBgOk) {
       const miss = s.requires_ccw && !ccwOkOn(me, e.starts_at);
       actions.push(h('button', { class: 'btn small primary', onclick: async () => {
         await shiftAction('cover_shift', { p_shift: s.id }, `Cover ${s.post || 'this post'} at ${e.title}?` + (miss ? "\n\nThis post prefers a CCW-qualified person, and you aren't listed as CCW-qualified on this date. You can still take it; it will be flagged." : ''), "You're covering — thanks! The schedule is updated.");
@@ -3486,7 +3593,7 @@
             const sel = h('select', { class: 'input assign-sel' + (dupCells.has(k) || ccwCells.has(k) ? ' warn' : '') + (a.draft[k] === NOT_USED ? ' not-used' : ''), 'aria-label': `${WEEK_LABELS[w - 1]} Sunday, ${s.title}, ${name}` },
               h('option', { value: '' }, '— Open —'),
               h('option', { value: NOT_USED }, '✕ Not used this week'),
-              people.map((r) => h('option', { value: r.id }, r.name + (ccwOkForever(r) ? ' · CCW' : ''))),
+              people.map((r) => h('option', { value: r.id, disabled: !bgCleared(r) && a.draft[k] !== r.id }, r.name + (ccwOkForever(r) ? ' · CCW' : '') + (bgCleared(r) ? '' : ` (check ${BG_LABELS[bgStatus(r)]})`))),
               a.draft[k] && !people.some((r) => r.id === a.draft[k]) ? h('option', { value: a.draft[k] }, rosterName(a.draft[k]) + ' (inactive)') : null);
             sel.value = a.draft[k] || '';
             sel.addEventListener('change', () => { a.draft[k] = sel.value; a.dirty = true; a.result = null; render(); });
@@ -4503,7 +4610,7 @@
           h('div', { class: 'grow' },
             h('div', { class: 'title' }, h('strong', {}, p.full_name)),
             h('div', { class: 'muted small' }, p.email),
-            myContact().phone ? h('div', { class: 'muted small' }, myContact().phone) : null,
+            myContact().phone ? h('div', { class: 'muted small' }, fmtPhone(myContact().phone)) : null,
             h('span', { class: 'badge' + (isAdmin() ? ' bolo' : '') }, ROLE_LABELS[role()] + (state.viewAsMember ? ' (preview)' : ''))),
           h('button', { class: 'btn small', onclick: () => editMyProfile() }, 'Edit profile')),
         profileIncomplete() ? h('p', { class: 'hint' }, 'Add your ' + missingParts().join(' and ') + ' so the team can reach and recognize you.') : null)
@@ -4536,6 +4643,15 @@
         h('a', { class: 'list-item', href: '#/activation' },
           h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Team activation'),
             h('div', { class: 'sub' }, 'Activate the whole security team')),
+          icon('chev'))));
+    }
+    if (isOfficeAdmin() || isAdmin()) {
+      const n = bgFeature() ? state.data.roster.filter((r) => r.active && bgStatus(r) !== 'complete').length : 0;
+      content.push(h('div', { class: 'list' + (isAdmin() ? ' list-tight' : '') },
+        h('a', { class: 'list-item', href: '#/background' },
+          h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Background checks'),
+            h('div', { class: 'sub' }, n ? `${n} not Complete yet` : 'Everyone on the team is Complete')),
+          n && isOfficeAdmin() ? h('span', { class: 'badge caution' }, n) : null,
           icon('chev'))));
     }
     if (realAdmin()) {
@@ -4725,9 +4841,21 @@
           }
           if (p.role === 'admin' && isSuper()) actions.push(roleBtn(p, 'member', 'Remove admin', 'danger', `Remove admin from ${p.full_name || p.email}? They will stay a member.`));
         }
+        if (isSuper() && 'is_office_admin' in p && p.role !== 'pending') {
+          actions.push(h('button', { class: 'btn small' + (p.is_office_admin ? ' danger' : ''), onclick: async (e) => {
+            const on = !p.is_office_admin;
+            if (!confirm(on ? `Make ${p.full_name || p.email} an Office Admin? They'll be able to see and set background checks.` : `Remove Office Admin from ${p.full_name || p.email}?`)) return;
+            e.currentTarget.disabled = true;
+            const { error } = await sb.rpc('set_office_admin', { target: p.id, p_on: on });
+            if (error) { toast(friendlyError(error)); e.currentTarget.disabled = false; return; }
+            if (p.id === state.profile.id) { state.profile.is_office_admin = on; cacheSet('profile', state.profile); await refreshTable('background_checks'); }
+            await afterSave('profiles', `${p.full_name || p.email}: ${on ? 'Office Admin' : 'no longer Office Admin'}`);
+          } }, p.is_office_admin ? 'Remove Office Admin' : 'Make Office Admin'));
+        }
         return h('div', { class: 'user-row' },
           h('div', { class: 'who' },
-            h('div', { class: 'title' }, h('strong', {}, p.full_name || '(no name yet)'), p.id === me ? ' (you)' : ''),
+            h('div', { class: 'title' }, h('strong', {}, p.full_name || '(no name yet)'), p.id === me ? ' (you)' : '',
+              p.is_office_admin ? h('span', { class: 'badge inline info-badge' }, 'Office Admin') : null),
             h('div', { class: 'muted small' }, p.email),
             h('div', { class: 'muted small' }, 'Joined ' + relTime(p.created_at)),
             declaredLine(p)),

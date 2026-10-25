@@ -725,3 +725,8 @@ fieldset.declare legend { font-size: .85rem; font-weight: 700; color: var(--mute
 .contact-list .list-item { align-items: center; }
 .contact-count { text-align: center; margin-top: 10px; }
 .contact-row .avatar { background: var(--muted); cursor: default; }
+
+/* ---------- Background checks / Office Admin ---------- */
+.badge.info-badge { background: var(--info-bg); color: var(--info); }
+.bg-card { margin-top: 10px; }
+.bg-row .small-select { max-width: 140px; flex: none; }

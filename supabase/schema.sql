@@ -2507,3 +2507,113 @@ do $$ begin
   alter publication supabase_realtime add table public.app_settings;
 exception when duplicate_object then null; when undefined_object then null;
 end $$;
+
+-- ---------------------------------------------------------------------
+-- Office Admin (the church office, usually the secretary) and background
+-- checks. Office Admin is an extra flag on top of anyone's role; only a
+-- superuser grants it. Only Office Admins mark a background check Complete
+-- or Denied. App admins and Office Admins can see the status; nobody else.
+-- Until someone's check is Complete they can use the app but can't be put on
+-- the schedule (assigned, volunteer, cover).
+-- ---------------------------------------------------------------------
+alter table public.profiles add column if not exists is_office_admin boolean not null default false;
+
+create or replace function public.is_office_admin() returns boolean
+language sql stable security definer set search_path = public as $$
+  select coalesce((select is_office_admin from public.profiles where id = auth.uid()
+                     and role in ('member','admin','superuser')), false)
+$$;
+
+create or replace function public.set_office_admin(target uuid, p_on boolean) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_superuser() then raise exception 'Only a superuser can grant or remove Office Admin'; end if;
+  update public.profiles set is_office_admin = coalesce(p_on, false) where id = target;
+  if not found then raise exception 'User not found'; end if;
+end $$;
+revoke all on function public.set_office_admin(uuid, boolean) from public, anon;
+grant execute on function public.set_office_admin(uuid, boolean) to authenticated;
+
+-- One row per roster entry. No row = Open.
+do $$
+declare fresh boolean := to_regclass('public.background_checks') is null;
+begin
+  create table if not exists public.background_checks (
+    roster_id   uuid primary key references public.roster(id) on delete cascade,
+    status      text not null default 'open' check (status in ('open','complete','denied')),
+    updated_at  timestamptz not null default now(),
+    updated_by  uuid references public.profiles(id) on delete set null
+  );
+  -- First time only: everyone already on the roster counts as cleared.
+  if fresh then
+    insert into public.background_checks (roster_id, status) select id, 'complete' from public.roster;
+  end if;
+end $$;
+alter table public.background_checks enable row level security;
+drop policy if exists background_checks_select on public.background_checks;
+create policy background_checks_select on public.background_checks for select to authenticated
+  using (public.is_admin() or public.is_office_admin());
+-- No direct writes: Office Admins use set_background_check.
+
+-- New people on the roster start Open.
+create or replace function public.roster_background_open() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  insert into public.background_checks (roster_id, status) values (new.id, 'open') on conflict (roster_id) do nothing;
+  return new;
+end $$;
+drop trigger if exists roster_background_open on public.roster;
+create trigger roster_background_open after insert on public.roster
+  for each row execute function public.roster_background_open();
+
+create or replace function public.background_ok(p_roster uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.background_checks where roster_id = p_roster and status = 'complete')
+$$;
+revoke all on function public.background_ok(uuid) from public, anon, authenticated;
+
+-- Can I take posts? (true if my check is Complete, or I'm not on the roster)
+create or replace function public.my_background_ok() returns boolean
+language sql stable security definer set search_path = public as $$
+  select case when public.my_roster_id() is null then true else public.background_ok(public.my_roster_id()) end
+$$;
+revoke all on function public.my_background_ok() from public, anon;
+grant execute on function public.my_background_ok() to authenticated;
+
+create or replace function public.set_background_check(p_roster uuid, p_status text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_office_admin() then raise exception 'Only the church office (Office Admins) can change background checks'; end if;
+  if p_status not in ('open','complete','denied') then raise exception 'Invalid status'; end if;
+  if not exists (select 1 from public.roster where id = p_roster) then raise exception 'Person not found'; end if;
+  insert into public.background_checks (roster_id, status, updated_at, updated_by)
+  values (p_roster, p_status, now(), auth.uid())
+  on conflict (roster_id) do update set status = excluded.status, updated_at = now(), updated_by = auth.uid();
+end $$;
+revoke all on function public.set_background_check(uuid, text) from public, anon;
+grant execute on function public.set_background_check(uuid, text) to authenticated;
+
+-- The rule itself, on every way a person gets onto a post (admin assigns,
+-- volunteer, cover, rotation, repeating events). The repeating schedule and
+-- rotation just leave the post Open instead; anything else is refused.
+create or replace function public.shifts_background_check() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare who text;
+begin
+  if new.roster_id is not null
+     and (tg_op = 'INSERT' or new.roster_id is distinct from old.roster_id)
+     and not public.background_ok(new.roster_id) then
+    if coalesce(current_setting('koinos.template', true), '') = 'on' then
+      new.roster_id := null;
+    elsif new.roster_id = public.my_roster_id() and not public.is_admin() then
+      raise exception 'You can''t take posts until your background check is complete. The church office will let you know.';
+    else
+      select name into who from public.roster where id = new.roster_id;
+      raise exception '% can''t be put on the schedule until their background check is complete.', coalesce(who, 'This person');
+    end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists shifts_a_background_check on public.shifts;
+create trigger shifts_a_background_check before insert or update of roster_id on public.shifts
+  for each row execute function public.shifts_background_check();
