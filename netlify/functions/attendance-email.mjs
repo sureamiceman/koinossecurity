@@ -72,9 +72,15 @@ export async function handle(req, { fetchImpl, env }) {
 
     const sameDay = await db.get(`attendance_counts?service_date=eq.${count.service_date}&select=*&order=service_no`);
     const services = (settings.services || []).map((s) => ({ no: Number(s.no), label: s.label, time: s.time }));
-    if (settings.email_when === 'day' && !sendNow) {
+    // "Once a day": the last service on the form ("Complete and send") sends one
+    // email with every service for the date, completed or not. Earlier services
+    // wait for it. A service completed after that email went out sends an update.
+    const daily = settings.email_when === 'day';
+    const finalNo = services.length ? Math.max(...services.map((s) => s.no)) : count.service_no;
+    const alreadySent = sameDay.some((c) => c.id !== count.id && c.email_state === 'sent');
+    if (daily && !sendNow) {
       const allIn = services.every((s) => sameDay.some((c) => c.service_no === s.no && c.status === 'submitted'));
-      if (!allIn) {
+      if (!allIn && count.service_no !== finalNo && !alreadySent) {
         await db.patch(`attendance_counts?id=eq.${count.id}`, { email_state: 'waiting', email_error: '' });
         return json(200, { state: 'waiting' });
       }
@@ -86,7 +92,7 @@ export async function handle(req, { fetchImpl, env }) {
       db.get(`attendance_values?count_id=in.(${ids})&select=*&order=sort_order`),
       db.get('profiles?select=id,full_name,email')
     ]);
-    const mail = buildEmail({ count, sameDay, services, values, profiles });
+    const mail = buildEmail({ count, sameDay, services, values, profiles, daily, update: daily && alreadySent });
     const who = profiles.find((p) => p.id === (count.corrections ? count.corrected_by : count.submitted_by));
     const replyTo = settings.reply_to || (who && who.email) || undefined;
 
@@ -148,7 +154,7 @@ const dayLabel = (iso) => { const [y, m, d] = iso.split('-').map(Number); return
 const shortDay = (iso) => { const [y, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }); };
 const clock = (iso) => new Date(iso).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
 
-export function buildEmail({ count, sameDay, services, values, profiles }) {
+export function buildEmail({ count, sameDay, services, values, profiles, daily = false, update = false }) {
   const nameOf = (id) => { const p = profiles.find((x) => x.id === id); return p ? (p.full_name || p.email) : 'someone'; };
   // Columns: every service on the form, plus any extra service counted that day.
   const cols = services.map((s) => ({ ...s, count: sameDay.find((c) => c.service_no === s.no) }));
@@ -169,7 +175,11 @@ export function buildEmail({ count, sameDay, services, values, profiles }) {
 
   const thisLabel = count.service_label || `Service ${count.service_no}`;
   const corrected = count.corrections > 0;
-  const subject = `${corrected ? 'Corrected: ' : ''}Worship Service Count – ${shortDay(count.service_date)} – ${thisLabel}: ${count.total}`;
+  const missing = cols.filter((s) => !(s.count && s.count.status === 'submitted')).map((s) => s.label);
+  const notIn = daily ? 'not completed' : 'not submitted yet';
+  const subject = daily
+    ? `${corrected ? 'Corrected: ' : update ? 'Updated: ' : ''}Worship Service Count – ${shortDay(count.service_date)} – Total ${dayTotal}${missing.length ? ` (${missing.join(', ')} not completed)` : ''}`
+    : `${corrected ? 'Corrected: ' : ''}Worship Service Count – ${shortDay(count.service_date)} – ${thisLabel}: ${count.total}`;
 
   const cell = 'padding:6px 10px;border-bottom:1px solid #e3e7ec;';
   const num = cell + 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;';
@@ -185,12 +195,12 @@ export function buildEmail({ count, sameDay, services, values, profiles }) {
   const html = `<!doctype html><html><body style="margin:0;background:#f3f5f8;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#16202c;">
 <div style="max-width:640px;margin:0 auto;padding:20px;">
 <div style="background:#0f2742;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0;">
-  <div style="font-size:13px;color:#e8b23e;font-weight:700;letter-spacing:.05em;text-transform:uppercase;">Worship Service Count${corrected ? ' · Corrected' : ''}</div>
+  <div style="font-size:13px;color:#e8b23e;font-weight:700;letter-spacing:.05em;text-transform:uppercase;">Worship Service Count${corrected ? ' · Corrected' : update ? ' · Updated' : ''}</div>
   <div style="font-size:20px;font-weight:700;margin-top:4px;">${esc(dayLabel(count.service_date))}</div>
 </div>
 <div style="background:#fff;padding:16px 20px 20px;border-radius:0 0 12px 12px;">
   <table role="presentation" style="width:100%;border-collapse:collapse;margin-bottom:14px;">
-    ${cols.map((s) => `<tr><td style="${cell}font-size:16px;">${esc(s.label)}</td><td style="${num}font-size:20px;font-weight:700;">${s.count && s.count.status === 'submitted' ? s.count.total : '<span style="font-size:14px;font-weight:400;color:#5d6b7c;">not submitted yet</span>'}</td></tr>`).join('')}
+    ${cols.map((s) => `<tr><td style="${cell}font-size:16px;">${esc(s.label)}</td><td style="${num}font-size:20px;font-weight:700;">${s.count && s.count.status === 'submitted' ? s.count.total : `<span style="font-size:14px;font-weight:400;color:#c62828;">${notIn}</span>`}</td></tr>`).join('')}
     <tr><td style="padding:10px;font-size:16px;font-weight:700;">Total count for this date${allIn ? '' : ' (so far)'}</td><td style="padding:10px;text-align:right;font-size:22px;font-weight:800;">${dayTotal}</td></tr>
   </table>
   <div style="font-size:13px;color:#5d6b7c;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin:18px 0 4px;">Details</div>
@@ -200,13 +210,13 @@ export function buildEmail({ count, sameDay, services, values, profiles }) {
     <tr><td style="padding:10px;font-weight:700;">Service total</td>${shown.map((s) => `<td style="padding:10px;text-align:right;font-weight:800;">${s.count.total}</td>`).join('')}</tr>
   </table>
   ${shown.filter((s) => s.count.notes).map((s) => `<p style="margin:12px 0 0;font-size:14px;"><strong>Notes (${esc(s.label)}):</strong> ${esc(s.count.notes)}</p>`).join('')}
-  <p style="margin:18px 0 0;font-size:13px;color:#5d6b7c;">${shown.map((s) => `${esc(s.label)} submitted by ${esc(nameOf(s.count.submitted_by))} at ${clock(s.count.submitted_at)}${s.count.corrections ? `, corrected by ${esc(nameOf(s.count.corrected_by))}` : ''}.`).join('<br>')}</p>
+  <p style="margin:18px 0 0;font-size:13px;color:#5d6b7c;">${shown.map((s) => `${esc(s.label)} ${daily ? 'completed' : 'submitted'} by ${esc(nameOf(s.count.submitted_by))} at ${clock(s.count.submitted_at)}${s.count.corrections ? `, corrected by ${esc(nameOf(s.count.corrected_by))}` : ''}.`).join('<br>')}</p>
 </div>
 <p style="font-size:12px;color:#5d6b7c;text-align:center;margin:12px 0 0;">Sent by the Koinos Security team app.</p>
 </div></body></html>`;
 
   const lines = [`WORSHIP SERVICE COUNT${corrected ? ' (CORRECTED)' : ''}`, dayLabel(count.service_date), ''];
-  for (const s of cols) lines.push(`${s.label}: ${s.count && s.count.status === 'submitted' ? s.count.total : 'not submitted yet'}`);
+  for (const s of cols) lines.push(`${s.label}: ${s.count && s.count.status === 'submitted' ? s.count.total : notIn}`);
   lines.push(`Total count for this date${allIn ? '' : ' (so far)'}: ${dayTotal}`, '');
   for (const s of shown) {
     lines.push(`--- ${s.label} ---`);
