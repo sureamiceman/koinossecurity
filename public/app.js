@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [], app_settings: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [], app_settings: [], background_checks: [], contact_filters: [], contact_filter_members: [] });
   const state = {
     session: null,
     profile: null,
@@ -32,7 +32,8 @@
     lastSeenAlerts: 0,
     att: { weeks: 8, drafts: {}, timer: null, inflight: null, correcting: null, setup: null, setupDirty: false, emailTried: {} },
     attMissing: false,
-    viewAsMember: false
+    viewAsMember: false,
+    myBgOk: true
   };
 
   const ROLE_LABELS = { pending: 'Pending approval', member: 'Member', admin: 'Admin', superuser: 'Superuser' };
@@ -41,6 +42,9 @@
   // member, hiding every admin tool. The database still knows you're an admin.
   const role = () => { const r = realRole(); return state.viewAsMember && (r === 'admin' || r === 'superuser') ? 'member' : r; };
   const realAdmin = () => ['admin', 'superuser'].includes(realRole());
+  // Office Admin (the church office): an extra flag on top of any role. Sees and
+  // sets background checks. Hidden while an admin uses "View as member".
+  const isOfficeAdmin = () => !state.viewAsMember && isMember() && !!(state.profile && state.profile.is_office_admin);
   const isMember = () => ['member', 'admin', 'superuser'].includes(role());
   const isAdmin = () => ['admin', 'superuser'].includes(role());
   const isSuper = () => role() === 'superuser';
@@ -148,6 +152,33 @@
     return (name || '?').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
   }
   const telHref = (p) => 'tel:' + String(p).replace(/[^0-9+*#,;]/g, '');
+  // US phone numbers always show as (555) 123-4567 (anything else is shown as typed).
+  function fmtPhone(p) {
+    const raw = String(p || '').trim();
+    let d = raw.replace(/\D/g, '');
+    if (d.length === 11 && d[0] === '1') d = d.slice(1);
+    return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : raw;
+  }
+  // While typing: 5551234567 → (555) 123-4567, a digit at a time.
+  function fmtPhoneTyping(v) {
+    let d = String(v || '').replace(/\D/g, '');
+    if (d.length > 10 && d[0] === '1') d = d.slice(1);
+    if (d.length > 10) return v;   // longer (extension, international): leave as typed
+    if (d.length < 4) return d.length ? `(${d}` : '';
+    if (d.length < 7) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
+    return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  }
+  function phoneInput(input) {
+    input.addEventListener('input', (e) => {
+      if (e.inputType && e.inputType.startsWith('delete')) return;   // let backspace work naturally
+      const atEnd = input.selectionStart === input.value.length;
+      const next = fmtPhoneTyping(input.value);
+      if (next !== input.value) { input.value = next; if (atEnd) input.setSelectionRange(next.length, next.length); }
+    });
+    input.addEventListener('blur', () => { input.value = fmtPhone(input.value); });
+    if (input.value) input.value = fmtPhone(input.value);
+    return input;
+  }
   const smsHref = (p) => 'sms:' + String(p).replace(/[^0-9+]/g, '');
   const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e || '');
 
@@ -260,7 +291,18 @@
         if (n.tagName === 'A') {
           const href = (n.getAttribute('href') || '').trim();
           const sm = SOP_HREF.exec(href);
-          if (sm) {
+          const cm = CONTACTS_HREF.exec(href);
+          if (cm) {
+            // A link to a group of contacts: opens Contacts on that filter's tab.
+            const fl = filterById(cm[1].toLowerCase());
+            if (!fl) {
+              // Deleted, or an "Admins only" filter this person can't see.
+              const span = h('span', { class: isAdmin() ? 'sop-link-gone' : '', title: isAdmin() ? 'The linked contact filter was deleted' : null });
+              copy(n, span); to.append(span); continue;
+            }
+            el.setAttribute('href', '#/contacts/' + fl.id);
+            el.className = `sop-link contact-link tc-${fl.color}`;
+          } else if (sm) {
             // A link to another SOP: opens it in the app. Shows in that SOP's tab color.
             const target = visibleSops().find((x) => x.id === sm[1].toLowerCase());
             if (!target && state.data.sops.some((x) => x.id === sm[1].toLowerCase())) {   // hidden while Teams is off: just the words
@@ -445,12 +487,16 @@
     attendance_values: (t) => t.select('*, attendance_counts!inner(service_date)').gte('attendance_counts.service_date', attSince()),
     teams: (t) => t.select('*').order('sort_order'),
     team_activations: (t) => t.select('*').order('created_at', { ascending: false }).limit(10),
-    app_settings: (t) => t.select('*')
+    app_settings: (t) => t.select('*'),
+    background_checks: (t) => t.select('*'),   // only admins and Office Admins get rows
+    contact_filters: (t) => t.select('*').order('sort_order'),   // "Admins only" filters come back to admins only
+    contact_filter_members: (t) => t.select('*')
   };
   const attSince = () => isoDay(new Date(Date.now() - 200 * 864e5));
-  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'app_settings', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
+  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'app_settings', 'background_checks', 'contact_filters', 'contact_filter_members', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
 
   function loadCachedData() {
+    if (cacheGet('myBgOk') === false) state.myBgOk = false;
     for (const t of Object.keys(QUERIES)) {
       const rows = cacheGet('data:' + t);
       if (Array.isArray(rows)) state.data[t] = rows;
@@ -474,6 +520,8 @@
       try { await sb.rpc('extend_series'); } catch { /* offline */ }
     }
     const results = await Promise.all(Object.keys(QUERIES).map(async (t) => [t, await refreshTable(t)]));
+    // Can I take posts? (background check). Unknown/offline = keep what we knew.
+    try { const { data, error } = await sb.rpc('my_background_ok'); if (!error && typeof data === 'boolean') { state.myBgOk = data; cacheSet('myBgOk', data); } } catch { /* offline */ }
     // Attendance tables missing = the database hasn't been updated yet; the rest of the app still works.
     if (results.some(([t, e]) => e && t.startsWith('attendance') && /does not exist|schema cache|could not find/i.test(e.message || ''))) state.attMissing = true;
     const errors = results.filter(([t, e]) => e && !OPTIONAL_TABLES.has(t)).map(([, e]) => e);
@@ -766,6 +814,32 @@
     dlg.showModal();
   }
 
+  // Pick a contact filter to link to (from the SOP editor).
+  function pickFilterDialog({ current }) {
+    return new Promise((resolve) => {
+      let result = null;
+      const dlg = h('dialog', { class: 'sop-picker' });
+      const choose = (r) => { result = r; dlg.close(); };
+      const list = filtersSorted();
+      append(dlg, [
+        h('div', { class: 'dlg-head' }, h('h2', {}, 'Link to contacts'),
+          h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: () => dlg.close() }, icon('x'))),
+        h('div', { class: 'dlg-body' },
+          h('p', { class: 'muted small' }, 'Readers tap the link to see who\'s in the group right now (with Call and Text), then Return to SOP. Tip: select words first to make them the link; otherwise the filter\'s name is put in.'),
+          list.length ? h('div', { class: 'sop-picker-list' }, list.map((f) => h('button', { type: 'button', class: `sop-picker-item tc-${f.color}` + (f.id === current ? ' on' : ''), onclick: () => choose({ id: f.id, title: f.name }) },
+            h('span', { class: 'grow' }, f.name), f.admins_only ? h('span', { class: 'muted small' }, 'admins only') : null, f.id === current ? h('span', { class: 'muted small' }, 'linked now') : null)))
+            : h('div', { class: 'sop-empty' }, 'No contact filters yet. Add them on the Contacts page (Edit filters).')),
+        h('div', { class: 'dlg-foot' },
+          current ? h('button', { type: 'button', class: 'btn danger', onclick: () => choose({ remove: true }) }, 'Remove link') : null,
+          h('div', { class: 'spacer' }),
+          h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Cancel'))
+      ]);
+      dlg.addEventListener('close', () => { dlg.remove(); resolve(result); });
+      document.body.append(dlg);
+      dlg.showModal();
+    });
+  }
+
   // Pick an SOP to link to (from the SOP editor). Resolves { id, title },
   // { remove: true } or null.
   function pickSopDialog({ current }, excludeId) {
@@ -902,8 +976,9 @@
         else input = h('input', { type: f.type || 'text', id, autocomplete: f.autocomplete || 'off', inputmode: f.inputmode, placeholder: f.placeholder, list: f.list ? id + '_list' : null });
         const v = values[f.name];
         input.value = v != null ? v : (f.default != null ? f.default : (f.type === 'select' ? f.options[0][0] : ''));
+        if (f.type === 'tel') { phoneInput(input); input.setAttribute('placeholder', f.placeholder || '(555) 555-5555'); }
         getters[f.name] = () => f.type === 'number' ? Number(input.value || 0)
-          : f.type === 'password' ? input.value : input.value.trim();
+          : f.type === 'password' ? input.value : f.type === 'tel' ? fmtPhone(input.value) : input.value.trim();
         getters[f.name].el = input;
         wrap = h('div', { class: 'field' },
           h('label', { for: id }, f.label + (f.required ? ' *' : '')), f.rich ? formatBar(input) : null, input,
@@ -1003,7 +1078,7 @@
       ccw.checked = !!p.requires_ccw;
       const who = h('select', { class: 'pe-who', 'aria-label': f.personLabel || 'Default person' },
         h('option', { value: '' }, f.openLabel || 'Open'),
-        people.map((r) => h('option', { value: r.id }, r.name + (r.ccw_qualified && (!r.ccw_expires_on || daysUntil(r.ccw_expires_on) >= 0) ? ' · CCW' : ''))));
+        people.map((r) => h('option', { value: r.id, disabled: !bgCleared(r) && r.id !== p.roster_id }, r.name + (r.ccw_qualified && (!r.ccw_expires_on || daysUntil(r.ccw_expires_on) >= 0) ? ' · CCW' : '') + (bgCleared(r) ? '' : ` (check ${BG_LABELS[bgStatus(r)]})`))));
       who.value = p.roster_id || '';
       const warn = h('div', { class: 'pe-warn hidden' });
       const check = () => {
@@ -1036,10 +1111,14 @@
   }
 
   async function saveRow(table, id, row) {
-    const { error } = id
-      ? await sb.from(table).update(row).eq('id', id)
-      : await sb.from(table).insert(row);
+    if (id) {
+      const { error } = await sb.from(table).update(row).eq('id', id);
+      if (error) throw error;
+      return id;
+    }
+    const { data, error } = await sb.from(table).insert(row).select('id').single();
     if (error) throw error;
+    return data && data.id;
   }
   async function deleteRow(table, id) {
     const { error } = await sb.from(table).delete().eq('id', id);
@@ -1303,14 +1382,16 @@
     let [tab, id, sub] = route();
     if ((tab === 'users' || tab === 'assignments') && !isAdmin()) tab = 'more';
     if (tab === 'attendance-setup' && !isAdmin()) tab = 'attendance';
+    if (tab === 'background' && !(isAdmin() || isOfficeAdmin())) tab = 'more';
+    if (tab !== 'contacts' && state.returnTo && !(tab === 'sops' && '#/sops/' + id === state.returnTo.hash)) state.returnTo = null;
     if (tab === 'teams' && (!isAdmin() || !teamsEnabled())) tab = 'contacts';
     if (tab === 'team') {   // the old Team tab: now Contacts → Security Team
       tab = 'contacts'; state.contactQuery = '';
       history.replaceState(null, '', '#/contacts');
     }
-    const views = { alerts: alertsView, schedule: scheduleView, confirm: confirmView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView, teams: teamsAdminView, activation: activationView };
+    const views = { alerts: alertsView, schedule: scheduleView, confirm: confirmView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView, teams: teamsAdminView, activation: activationView, background: backgroundView };
     const v = (views[tab] || alertsView)(id, sub);
-    const activeTab = tab === 'users' ? 'more' : (tab === 'assignments' || tab === 'confirm') ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : tab === 'teams' ? 'contacts' : tab === 'activation' ? 'alerts' : (views[tab] ? tab : 'alerts');
+    const activeTab = (tab === 'users' || tab === 'background') ? 'more' : (tab === 'assignments' || tab === 'confirm') ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : tab === 'teams' ? 'contacts' : tab === 'activation' ? 'alerts' : (views[tab] ? tab : 'alerts');
 
     if (activeTab === 'alerts') {
       state.lastSeenAlerts = Date.now();
@@ -1531,8 +1612,8 @@
 
   // Admins: name, color and order the tabs.
   // Shared tab editor (SOP tabs, Contact tabs): name, color and order.
-  function tabEditor({ title, intro, tabs, countOf, itemWord, rpc, onSaved }) {
-    const rows = tabs.map((t) => ({ id: t.id || null, name: t.name, color: t.color, k: Math.random().toString(36).slice(2) }));
+  function tabEditor({ title, intro, tabs, countOf, itemWord, rpc, onSaved, visibility = false, allowNone = false, removeText = null, addLabel = '+ Add tab', savedText = 'Tabs saved' }) {
+    const rows = tabs.map((t) => ({ id: t.id || null, name: t.name, color: t.color, admins_only: !!t.admins_only, k: Math.random().toString(36).slice(2) }));
     const list = h('div', { class: 'tab-editor' });
     const draw = () => {
       list.replaceChildren(...rows.map((r, i) => {
@@ -1554,12 +1635,19 @@
             h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Move down', disabled: i === rows.length - 1 || null, onclick: () => { [rows[i + 1], rows[i]] = [rows[i], rows[i + 1]]; draw(); } }, '↓'),
             h('button', {
               type: 'button', class: 'icon-btn mini', 'aria-label': 'Remove tab', onclick: () => {
-                if (rows.length === 1) { toast('Keep at least one tab.'); return; }
+                if (rows.length === 1 && !allowNone) { toast('Keep at least one tab.'); return; }
                 const dest = rows.find((x) => x !== r);
-                if (n && !confirm(`${n} ${itemWord}${n > 1 ? 's' : ''} in "${r.name}" will move to "${dest.name}" (the first tab) when you save. Remove the tab?`)) return;
+                if (removeText) { if (r.id && !confirm(removeText(r, n))) return; }
+                else if (n && !confirm(`${n} ${itemWord}${n > 1 ? 's' : ''} in "${r.name}" will move to "${dest.name}" (the first tab) when you save. Remove the tab?`)) return;
                 rows.splice(i, 1); draw();
               }
             }, icon('x'))),
+          visibility ? h('label', { class: 'te-vis' }, (() => {
+            const cb = h('input', { type: 'checkbox' });
+            cb.checked = r.admins_only;
+            cb.addEventListener('change', () => { r.admins_only = cb.checked; });
+            return cb;
+          })(), 'Admins only (hidden from members)') : null,
           palette);
       }));
     };
@@ -1569,22 +1657,22 @@
       body: [
         h('p', { class: 'muted small dlg-intro' }, intro),
         list,
-        h('button', { type: 'button', class: 'btn small', onclick: () => { const r = { id: null, name: '', color: 'gray', k: Math.random().toString(36).slice(2) }; rows.push(r); draw(); const el = document.getElementById('te_' + r.k); if (el) el.focus(); } }, '+ Add tab')
+        h('button', { type: 'button', class: 'btn small', onclick: () => { const r = { id: null, name: '', color: 'gray', k: Math.random().toString(36).slice(2) }; rows.push(r); draw(); const el = document.getElementById('te_' + r.k); if (el) el.focus(); } }, addLabel)
       ],
       buttons: (close) => [
         h('button', { class: 'btn', onclick: close }, 'Cancel'),
         h('button', {
           class: 'btn primary', onclick: async (e) => {
             const btn = e.currentTarget;
-            const clean = rows.map((r) => ({ id: r.id, name: r.name.trim(), color: r.color }));
-            if (clean.some((r) => !r.name)) { toast('Every tab needs a name.'); return; }
+            const clean = rows.map((r) => ({ id: r.id, name: r.name.trim(), color: r.color, ...(visibility ? { admins_only: r.admins_only } : {}) }));
+            if (clean.some((r) => !r.name)) { toast('Every one needs a name.'); return; }
             btn.disabled = true;
             const { error } = await sb.rpc(rpc, { p: clean });
             if (error) { toast(friendlyError(error), 6000); btn.disabled = false; return; }
             close();
             await onSaved(clean);
             render();
-            toast('Tabs saved');
+            toast(savedText);
           }
         }, 'Save')
       ]
@@ -1619,7 +1707,12 @@
     const from = sopById(trail[trail.length - 1]);
     if (trail.length && !from) trail.length = 0;
     const body = sopBody(s.body, s.format, 'sop-body');
-    body.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('a.sop-link')) state.sopTrail.push(s.id); });
+    body.addEventListener('click', (e) => {
+      const a = e.target.closest && e.target.closest('a.sop-link');
+      if (!a) return;
+      if (a.classList.contains('contact-link')) state.returnTo = { hash: '#/sops/' + s.id, title: s.title, scroll: window.scrollY };
+      else state.sopTrail.push(s.id);
+    });
     // Other SOPs that link here.
     const needle = '#/sops/' + s.id;
     const linkedFrom = visibleSops().filter((x) => x.id !== s.id && x.format === 'html' && String(x.body || '').toLowerCase().includes(needle)).sort((a, b) => a.title.localeCompare(b.title));
@@ -1715,7 +1808,8 @@
             placeholder: 'Write the procedure. Tip: paste from Word or Google Docs to keep lists and tables.',
             uploadImage: async (file) => { const p = await uploadSopImage(file); uploaded.push(p); return p; },
             imageUrl: (p) => sopImageUrl(p),
-            pickSop: (o) => pickSopDialog(o, s.id)
+            pickSop: (o) => pickSopDialog(o, s.id),
+            pickFilter: (o) => pickFilterDialog(o)
           });
           return {
             get: () => (ed.isEmpty() ? '' : ed.getHTML()),
@@ -1755,9 +1849,9 @@
     return h('a', { class: `cbtn cbtn-${kind}`, href, 'aria-label': label, title: label },
       icon({ call: 'phone', text: 'msg', email: 'mail' }[kind]), tag ? h('span', { class: 'cbtn-tag', 'aria-hidden': 'true' }, tag) : null);
   }
-  const callBtn = (phone, alt, who) => contactBtn('call', telHref(phone), `${alt ? 'Call alternate number' : 'Call'}${who ? ' ' + who : ''} (${phone})`, alt ? '2' : null);
+  const callBtn = (phone, alt, who) => contactBtn('call', telHref(phone), `${alt ? 'Call alternate number' : 'Call'}${who ? ' ' + who : ''} (${fmtPhone(phone)})`, alt ? '2' : null);
   // Opens the phone's own messaging app, addressed to this number.
-  const textBtn = (phone, who) => contactBtn('text', smsHref(phone), `Text${who ? ' ' + who : ''} (${phone})`);
+  const textBtn = (phone, who) => contactBtn('text', smsHref(phone), `Text${who ? ' ' + who : ''} (${fmtPhone(phone)})`);
   const emailBtn = (email, who) => contactBtn('email', 'mailto:' + email, `Email${who ? ' ' + who : ''} (${email})`);
   // The row of buttons for one person or contact.
   const reachBtns = ({ phone, alt_phone, email, name }) => {
@@ -1777,7 +1871,7 @@
       h('div', { class: 'grow' },
         h('div', { class: 'title' }, c.name),
         c.organization ? h('div', { class: 'sub' }, c.organization) : null,
-        c.phone ? h('div', { class: 'sub' }, c.phone + (c.alt_phone ? ' · ' + c.alt_phone : '')) : null,
+        c.phone ? h('div', { class: 'sub' }, fmtPhone(c.phone) + (c.alt_phone ? ' · ' + fmtPhone(c.alt_phone) : '')) : null,
         c.notes ? richText(c.notes, 'sub body-text') : null,
         isAdmin() && rosterTwin(c) ? h('div', { class: 'notice twin' }, `Looks like ${rosterTwin(c).name} from the Security Team.`,
           h('button', { class: 'btn small', onclick: () => mergeContact(c, rosterTwin(c)) }, 'Merge')) : null,
@@ -1795,44 +1889,118 @@
           r.is_medical ? h('span', { class: 'badge medical inline' }, 'Medical') : null,
           c ? h('span', { class: 'badge inline ' + c.cls }, c.label) : null,
           !r.active ? h('span', { class: 'badge inline muted-badge' }, 'Inactive') : null,
+          bgBadge(r),
           t ? [' ', teamChip(t)] : null),
         r.is_medical && r.medical_notes ? h('div', { class: 'sub med-notes' }, r.medical_notes) : null,
         r.position ? h('div', { class: 'sub' }, r.position) : null,
-        h('div', { class: 'sub' }, r.phone || 'No phone listed')),
+        h('div', { class: 'sub' }, r.phone ? fmtPhone(r.phone) : 'No phone listed')),
       reachBtns({ phone: r.phone, name: r.name }));
   }
   const byName = (a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name);
   const byAlpha = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
 
-  function contactsView() {
-    const search = h('input', { class: 'search', type: 'search', placeholder: 'Search contacts', 'aria-label': 'Search contacts' });
-    search.value = state.contactQuery || '';
-    const wrap = h('div', {});
-    const draw = () => { wrap.replaceChildren(); append(wrap, contactList()); };
-    search.addEventListener('input', () => { state.contactQuery = search.value; draw(); });
-    draw();
-    return { title: 'Contacts', action: isAdmin() ? topAction('+ New', addContact) : null, content: [search, wrap] };
+  // ---- Contact filters (admin-made groups shown as tabs; linkable from SOPs) ----
+  // (The database already hides "Admins only" filters from members; this also hides them in View as member.)
+  const visibleFilters = () => state.data.contact_filters.filter((f) => isAdmin() || !f.admins_only);
+  const filtersSorted = () => visibleFilters().sort((a, b) => a.sort_order - b.sort_order);
+  const filterById = (id) => visibleFilters().find((f) => f.id === id);
+  const filterIdsOf = (kind, id) => state.data.contact_filter_members.filter((m) => (kind === 'r' ? m.roster_id : m.contact_id) === id).map((m) => m.filter_id);
+  const inFilter = (f, kind, id) => state.data.contact_filter_members.some((m) => m.filter_id === f.id && (kind === 'r' ? m.roster_id : m.contact_id) === id);
+  const CONTACTS_HREF = /^#\/contacts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+  function editContactFilters() {
+    tabEditor({
+      title: 'Edit contact filters',
+      intro: 'Filters are the tabs on the Contacts page (e.g. Medical, Pastor, Church Staff). Tick who belongs in each on the person\'s Edit form; someone can be in several. "Admins only" filters (e.g. CCW) are hidden from everyone else. SOPs can link to a filter with the Contacts link button.',
+      tabs: filtersSorted(), itemWord: 'person', rpc: 'save_contact_filters', visibility: true, allowNone: true,
+      addLabel: '+ Add filter', savedText: 'Filters saved',
+      countOf: (name) => { const f = state.data.contact_filters.find((x) => x.name === name); return f ? state.data.contact_filter_members.filter((m) => m.filter_id === f.id).length : 0; },
+      removeText: (r, n) => `Delete the "${r.name}" filter?${n ? ` ${n} ${n > 1 ? 'people are' : 'person is'} in it (they stay in Contacts).` : ''} SOP links to it will show crossed out.`,
+      onSaved: async () => { await Promise.all([refreshTable('contact_filters'), refreshTable('contact_filter_members')]); }
+    });
   }
 
-  function contactList() {
+  // Checkbox chips on a person's / contact's Edit form (admins).
+  function filtersField(kind, id) {
+    return { name: 'filters', label: 'Contact filters', type: 'custom', build: (box) => {
+      const chosen = new Set(id ? filterIdsOf(kind, id) : []);
+      const list = filtersSorted();
+      if (!list.length) box.append(h('div', { class: 'muted small' }, 'No filters yet. Add them with Edit filters at the bottom of the Contacts page.'));
+      for (const f of list) {
+        const cb = h('input', { type: 'checkbox' });
+        cb.checked = chosen.has(f.id);
+        cb.addEventListener('change', () => { if (cb.checked) chosen.add(f.id); else chosen.delete(f.id); });
+        box.append(h('label', { class: `filter-chip tc-${f.color}` }, cb, f.name, f.admins_only ? h('span', { class: 'muted tiny' }, ' (admins only)') : null));
+      }
+      return { get: () => [...chosen] };
+    } };
+  }
+  async function saveFilters(kind, id, ids) {
+    if (!id || !Array.isArray(ids) || !state.data.contact_filters.length) return;
+    const before = filterIdsOf(kind, id).sort().join();
+    if (before === ids.slice().sort().join()) return;
+    const { error } = await sb.rpc('set_contact_filters', { p_roster: kind === 'r' ? id : null, p_contact: kind === 'c' ? id : null, p_filters: ids });
+    if (error) throw error;
+    await refreshTable('contact_filter_members');
+  }
+
+  // #/contacts = All, #/contacts/<filter id> = that filter's tab.
+  function contactsView(filterId) {
+    const f = filterId && filterById(filterId);
+    const search = h('input', { class: 'search', type: 'search', placeholder: f ? `Search ${f.name}` : 'Search contacts', 'aria-label': 'Search contacts' });
+    search.value = state.contactQuery || '';
+    const wrap = h('div', {});
+    const draw = () => { wrap.replaceChildren(); append(wrap, contactList(f)); };
+    search.addEventListener('input', () => { state.contactQuery = search.value; draw(); });
+    draw();
+    const ret = state.returnTo;
+    const back = ret ? h('button', { type: 'button', class: 'return-bar', onclick: () => returnToSop() },
+      h('span', { class: 'rb-arrow', 'aria-hidden': 'true' }, '‹'), h('span', { class: 'grow' }, h('span', { class: 'small' }, 'Return to SOP'), h('strong', {}, ret.title))) : null;
+    return { title: f ? f.name : 'Contacts', action: isAdmin() ? topAction('+ New', addContact) : null, content: [back, search, wrap] };
+  }
+  function returnToSop() {
+    const ret = state.returnTo;
+    if (!ret) return;
+    state.pendingScroll = ret.scroll;
+    state.returnTo = null;
+    location.hash = ret.hash;
+  }
+
+  function contactList(f) {
     const ql = (state.contactQuery || '').trim().toLowerCase();
-    const people = state.data.roster.filter((r) => r.active || isAdmin());
-    const others = state.data.contacts;
+    let people = state.data.roster.filter((r) => r.active || isAdmin());
+    let others = state.data.contacts;
+    if (f) {
+      people = people.filter((r) => inFilter(f, 'r', r.id) && r.active);
+      others = others.filter((c) => inFilter(f, 'c', c.id));
+    }
     const pText = (r) => `${r.name} ${r.position} ${r.phone} ${r.email} ${r.is_medical ? 'medical ' + (r.medical_notes || '') : ''} ${r.ccw_qualified && isAdmin() ? 'ccw' : ''} ${(teamOfPerson(r) || {}).name || ''}`;
     const cText = (c) => `${c.name} ${c.organization} ${c.phone} ${c.alt_phone} ${plainText(c.notes)}`;
     const rows = [
       ...people.filter((r) => !ql || pText(r).toLowerCase().includes(ql)).map((r) => ({ name: r.name, inactive: !r.active, el: () => personRow(r) })),
       ...others.filter((c) => !ql || cText(c).toLowerCase().includes(ql)).map((c) => ({ name: c.name, el: () => contactRow(c) }))
     ].sort((a, b) => (a.inactive ? 1 : 0) - (b.inactive ? 1 : 0) || byAlpha(a, b));
-    const out = [];
-    // Admins: CCW qualifications that need attention.
-    const problems = isAdmin() ? state.data.roster.filter((r) => r.active && ccwStatus(r) && ccwStatus(r).problem) : [];
-    if (problems.length && !ql) out.push(h('div', { class: 'notice' },
+    const panelBody = [];
+    // Admins: CCW qualifications that need attention (on All only).
+    const problems = isAdmin() && !f ? state.data.roster.filter((r) => r.active && ccwStatus(r) && ccwStatus(r).problem) : [];
+    if (problems.length && !ql) panelBody.push(h('div', { class: 'notice' },
       `${problems.length} CCW qualification${problems.length > 1 ? 's' : ''} expired, expiring within ${CCW_WARN_DAYS} days, or missing a date: ${problems.map((r) => r.name).join(', ')}`));
-    out.push(rows.length ? h('div', { class: 'list contact-list' }, rows.map((r) => r.el()))
-      : empty(ql ? 'No contacts match your search.' : 'No contacts yet.', 'phone'));
-    if (!ql) out.push(h('p', { class: 'muted small contact-count' }, `${people.filter((r) => r.active).length} on the Security Team · ${others.length} other contact${others.length === 1 ? '' : 's'}`));
-    return out;
+    panelBody.push(rows.length ? h('div', { class: 'list flat contact-list' }, rows.map((r) => r.el()))
+      : h('div', { class: 'sop-empty' }, ql ? 'No contacts match your search.' : f ? `Nobody is in ${f.name} yet.${isAdmin() ? ' Tick it on a person\'s Edit form.' : ''}` : 'No contacts yet.'));
+    const filters = filtersSorted();
+    const count = f ? `${rows.length}` : `${people.filter((r) => r.active).length} on the Security Team · ${others.length} other${others.length === 1 ? '' : 's'}`;
+    const panel = h('section', { class: `sop-panel tc-${f ? f.color : 'gray'}` },
+      h('div', { class: 'sop-panel-head' }, h('h2', {}, f ? f.name : 'All contacts', f && f.admins_only ? h('span', { class: 'badge inline muted-badge' }, 'Admins only') : null), h('span', { class: 'muted small' }, count)),
+      panelBody,
+      isAdmin() ? h('div', { class: 'sop-panel-foot' }, h('button', { class: 'btn small', onclick: editContactFilters }, filters.length ? 'Edit filters' : '+ Add filters')) : null);
+    if (!filters.length) return [panel];
+    // Tabs down the right side: All, then the filters.
+    const tab = (key, name, color) => h('a', {
+      class: `sop-tab tc-${color}` + ((f ? f.id : null) === key ? ' on' : ''), href: key ? '#/contacts/' + key : '#/contacts',
+      'aria-current': (f ? f.id : null) === key ? 'page' : null, title: name,
+      onclick: (e) => { e.preventDefault(); state.contactQuery = ''; location.replace(key ? '#/contacts/' + key : '#/contacts'); }
+    }, h('span', {}, name));
+    return [h('div', { class: 'rolodex' }, panel, h('nav', { class: 'sop-rail', 'aria-label': 'Contact filters' }, tab(null, 'All', 'gray'), filters.map((x) => tab(x.id, x.name, x.color))))];
   }
 
   // Admins: + New → a Security Team member (can be linked to an app account,
@@ -1858,10 +2026,13 @@
         { name: 'organization', label: 'Organization / role' },
         { name: 'phone', label: 'Phone', type: 'tel', autocomplete: 'tel', inputmode: 'tel' },
         { name: 'alt_phone', label: 'Alternate phone', type: 'tel', inputmode: 'tel' },
-        { name: 'notes', label: 'Notes', type: 'textarea', rows: 3 }
-      ],
+        { name: 'notes', label: 'Notes', type: 'textarea', rows: 3 },
+        state.data.contact_filters.length ? filtersField('c', c.id) : null
+      ].filter(Boolean),
       onSubmit: async (v) => {
-        await saveRow('contacts', c.id, v);
+        const ids = v.filters; delete v.filters;
+        const id = await saveRow('contacts', c.id, v);
+        await saveFilters('c', id, ids);
         await afterSave('contacts', 'Contact saved');
       },
       onDelete: isNew ? null : async () => { await deleteRow('contacts', c.id); await afterSave('contacts', 'Contact deleted'); }
@@ -1880,6 +2051,63 @@
     return Math.round((d - t) / 86400000);
   }
   const fmtDay = (s) => dateOnly(s).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+
+  // ---- Background checks (seen by admins and Office Admins only) ----
+  const BG_LABELS = { open: 'Open', complete: 'Complete', denied: 'Denied' };
+  const bgFeature = () => state.data.background_checks.length > 0;   // database updated (and allowed to see)
+  const canSeeBg = () => (isAdmin() || isOfficeAdmin()) && bgFeature();
+  const bgStatus = (r) => ((r && state.data.background_checks.find((b) => b.roster_id === r.id)) || {}).status || 'open';
+  const bgCleared = (r) => !bgFeature() || bgStatus(r) === 'complete';
+  const bgBadge = (r, always) => {
+    if (!canSeeBg() || !r) return null;
+    const st = bgStatus(r);
+    if (st === 'complete' && !always) return null;
+    return h('span', { class: 'badge inline ' + (st === 'complete' ? 'ok-badge' : st === 'denied' ? 'urgent' : 'caution'), title: 'Background check' }, 'Check: ' + BG_LABELS[st]);
+  };
+  async function setBackgroundCheck(r, status) {
+    const { error } = await sb.rpc('set_background_check', { p_roster: r.id, p_status: status });
+    if (error) { toast(friendlyError(error), 5000); return false; }
+    await refreshTable('background_checks');
+    render();
+    toast(`${r.name}: background check ${BG_LABELS[status]}`);
+    return true;
+  }
+  function bgPicker(r) {
+    const sel = h('select', { class: 'input small-select', 'aria-label': `Background check for ${r.name}` },
+      Object.entries(BG_LABELS).map(([v, l]) => h('option', { value: v }, l)));
+    sel.value = bgStatus(r);
+    sel.addEventListener('change', async () => {
+      const prev = bgStatus(r);
+      if (sel.value === 'denied' && !confirm(`Mark ${r.name}'s background check as Denied? They won't be able to be scheduled.`)) { sel.value = prev; return; }
+      if (!(await setBackgroundCheck(r, sel.value))) sel.value = prev;
+    });
+    return sel;
+  }
+
+  // #/background — the church office's list (admins can look, only Office Admins change).
+  function backgroundView() {
+    const people = state.data.roster.slice().sort((a, b) => (b.active - a.active) || a.name.localeCompare(b.name));
+    const pending = people.filter((r) => r.active && bgStatus(r) !== 'complete');
+    const showAll = state.bgShowAll || !pending.length;
+    const chip = (all, label) => h('button', { class: 'chip' + (showAll === all ? ' on' : ''), onclick: () => { state.bgShowAll = all; render(); } }, label);
+    const rows = showAll ? people : pending;
+    const content = [
+      h('p', { class: 'muted small' }, isOfficeAdmin()
+        ? 'Mark each Security Team member Complete once their background check is done. Until then they can use the app but can\'t be put on the schedule (assigned, volunteer or cover). Only admins and the church office see this.'
+        : 'Only the church office (Office Admins) can change these. Until someone is Complete they can\'t be put on the schedule.'),
+      h('div', { class: 'chips' }, chip(false, `Needs attention (${pending.length})`), chip(true, `Everyone (${people.length})`))
+    ];
+    if (!bgFeature()) content.push(h('div', { class: 'notice' }, 'The database needs updating first: run supabase/schema.sql in the Supabase SQL editor.'));
+    content.push(rows.length ? h('div', { class: 'list' }, rows.map((r) => {
+      const b = state.data.background_checks.find((x) => x.roster_id === r.id);
+      return h('div', { class: 'list-item bg-row' + (r.active ? '' : ' inactive') },
+        h('div', { class: 'grow' },
+          h('div', { class: 'title' }, r.name, !r.active ? h('span', { class: 'badge inline muted-badge' }, 'Inactive') : null),
+          h('div', { class: 'sub' }, b && b.updated_by ? `${BG_LABELS[bgStatus(r)]} · set by ${nameOf(b.updated_by) || 'the office'} ${relTime(b.updated_at)}` : BG_LABELS[bgStatus(r)])),
+        isOfficeAdmin() ? bgPicker(r) : bgBadge(r, true));
+    })) : empty('Everyone on the team is Complete.', 'users'));
+    return { title: 'Background checks', back: '#/more', content };
+  }
 
   function ccwStatus(p) {
     if (!p.ccw_qualified) return null;
@@ -1938,7 +2166,13 @@
         c ? h('div', { class: 'card' },
           h('span', { class: 'badge ' + c.cls }, c.label === 'CCW' ? 'CCW qualified' : c.label),
           h('div', { class: 'body-text' }, c.detail)) : null,
-        p.phone ? h('div', { class: 'meta' }, p.phone) : null,
+        filterIdsOf('r', p.id).length ? h('div', { class: 'filter-chips' }, filtersSorted().filter((f) => inFilter(f, 'r', p.id)).map((f) =>
+          h('a', { class: `sop-chip tc-${f.color}`, href: '#/contacts/' + f.id, onclick: () => { const d = document.querySelector('dialog[open]'); if (d) d.close(); } }, f.name))) : null,
+        canSeeBg() ? h('div', { class: 'card bg-card' }, h('div', { class: 'row' },
+          h('div', { class: 'grow' }, h('strong', {}, 'Background check: '), BG_LABELS[bgStatus(p)],
+            bgStatus(p) !== 'complete' ? h('div', { class: 'muted small' }, "Can't be put on the schedule until it's Complete.") : null),
+          isOfficeAdmin() ? bgPicker(p) : null)) : null,
+        p.phone ? h('div', { class: 'meta' }, fmtPhone(p.phone)) : null,
         p.email ? h('div', { class: 'meta' }, p.email) : null,
         reachBtns({ phone: p.phone, email: p.email, name: p.name })
       ],
@@ -1990,6 +2224,7 @@
           options: [['', 'Not linked'], ...accounts.map((a) => [a.id, `${a.full_name || '(no name)'} — ${a.email}`])],
           hint: 'Link the person\'s sign-in so they can see "My assignments" and volunteer or swap. Left blank, it links automatically when the email matches.' },
         { name: 'declared', label: '', type: 'custom', build: declaredHelper },
+        ...(state.data.contact_filters.length ? [filtersField('r', p.id)] : []),
         { name: 'photo', label: 'Photo', type: 'photo', currentUrl: p.photo_path ? state.photoUrls[p.photo_path] : null },
         { name: 'is_medical', label: 'Show on the Medical tab (medical point of contact)', type: 'checkbox' },
         { name: 'medical_notes', label: 'Medical qualifications', placeholder: 'e.g. RN, EMT, CPR/AED certified', visible: (v) => v.is_medical, hint: 'Shown under their name on the Medical tab.' },
@@ -2000,6 +2235,7 @@
       ],
       onSubmit: async (v, photo) => {
         delete v.declared;
+        const filterIds = v.filters; delete v.filters;
         if (!v.profile_id && v.email) {
           const match = accounts.find((a) => a.email && a.email.toLowerCase() === v.email.toLowerCase());
           const taken = match && state.data.roster.some((r) => r.profile_id === match.id && r.id !== p.id);
@@ -2009,14 +2245,16 @@
         const ph = await applyPhoto('roster', p.photo_path, photo);
         const row = { ...v, profile_id: v.profile_id || null, ccw_expires_on: v.ccw_expires_on || null, photo_path: ph.path };
         if ('team_id' in v) row.team_id = v.team_id || null;
+        let savedId = p.id;
         try {
-          await saveRow('roster', p.id, row);
+          savedId = await saveRow('roster', p.id, row);
         } catch (e) {
           if (ph.path && ph.path !== p.photo_path) removePhoto(ph.path);
           if (/roster_profile_id_key|duplicate key/i.test(e.message || '')) throw new Error('That app account is already linked to another roster entry.');
           throw e;
         }
         removePhoto(ph.oldToRemove);
+        await saveFilters('r', savedId, filterIds);
         if (row.profile_id && row.profile_id !== p.profile_id) notifyServer(); // welcome post
         await afterSave('roster', isNew ? 'Team member added' : 'Saved');
         refreshTable('posts');
@@ -2323,6 +2561,7 @@
     const v = scheduleViewInner();
     const banner = confirmBanner();
     if (banner) v.content = [banner, ...[].concat(v.content)];
+    if (!state.myBgOk && myRoster()) v.content = [h('div', { class: 'notice' }, "You can see the schedule, but you can't volunteer, cover or be assigned until your background check is complete. The church office will mark it when it's done."), ...[].concat(v.content)];
     return v;
   }
 
@@ -2487,7 +2726,9 @@
     const answerable = mine && upcoming && !s.cover_requested && (s.confirm_state === 'asked' || (s.confirm_state === 'none' && shiftStart(s, e) - Date.now() < 7 * 864e5));
     if (answerable) actions.push(h('button', { class: 'btn small primary', onclick: () => confirmMine(s) }, 'Confirm'));
     if (upcoming && me) {
-      if (!s.roster_id) {
+      if (!state.myBgOk && (!s.roster_id || (s.cover_requested && !mine))) {
+        // Background check not Complete: can't take posts (the schedule tab explains).
+      } else if (!s.roster_id) {
         actions.push(h('button', { class: 'btn small primary', onclick: () => shiftAction('volunteer_shift', { p_shift: s.id }, `Volunteer for ${s.post || 'this post'} at ${e.title}?` + ccwNote, "You're on the schedule — thanks!") }, 'Volunteer'));
       // One way to ask for cover: a board post tied to this shift (this is a shortcut to it).
       } else if (mine && !s.cover_requested) actions.push(h('button', { class: 'btn small', onclick: () => newPost('swap', s.id) }, 'Need cover'));
@@ -2506,6 +2747,7 @@
           assigned ? avatar(assigned) : h('span', { class: 'avatar open', 'aria-hidden': 'true' }, '?'),
           s.roster_id ? h('span', { class: 'person-name' + (notCcw ? ' ccw-miss' : '') }, rosterName(s.roster_id) + (mine ? ' (you)' : '')) : h('span', { class: 'badge caution' }, 'Open'),
           notCcw ? noCcwBadge() : null,
+          isAdmin() && assigned && !bgCleared(assigned) ? h('span', { class: 'badge urgent', title: "Assigned before their background check was marked Complete. Reassign, or ask the church office." }, 'Check ' + BG_LABELS[bgStatus(assigned)]) : null,
           s.cover_requested ? h('span', { class: 'badge urgent' }, 'Needs cover') : null,
           s.roster_id && !s.cover_requested && upcoming ? confirmBadge(s) : null,
           isAdmin() && upcoming && assigned && !assigned.profile_id && 'confirm_state' in s && shiftStart(s, e) - Date.now() < 4 * 864e5
@@ -2823,7 +3065,7 @@
       fields: [
         { name: 'post', label: 'Post', required: true, placeholder: 'e.g. Parking lot', list: knownPosts() },
         { name: 'requires_ccw', label: 'CCW-qualified team member preferred', type: 'checkbox', hint: 'Anyone can still be assigned, volunteer or cover; someone without a current CCW is flagged in red.' },
-        { name: 'roster_id', label: 'Assigned to', type: 'select', options: [['', 'Open — needs a volunteer'], ...people.map((r) => [r.id, r.name + (ccwOkOn(r, e.starts_at) ? ' · CCW' : '')])] },
+        { name: 'roster_id', label: 'Assigned to', type: 'select', options: [['', 'Open — needs a volunteer'], ...people.map((r) => [r.id, r.name + (ccwOkOn(r, e.starts_at) ? ' · CCW' : '') + (bgCleared(r) ? '' : ` · check ${BG_LABELS[bgStatus(r)]}`)])] },
         { name: 'start', label: 'Start (optional)', type: 'time', hint: `Leave both times blank to use the event time (${timeRange(new Date(e.starts_at), new Date(e.ends_at))}).` },
         { name: 'end', label: 'End (optional)', type: 'time' },
         { name: 'note', label: 'Note', placeholder: 'e.g. Bring radio, meet at east door' },
@@ -2832,6 +3074,10 @@
       ],
       onSubmit: async (v) => {
         if (!!v.start !== !!v.end) throw new Error('Enter both a start and end time, or leave both blank.');
+        if (v.roster_id && v.roster_id !== s.roster_id) {
+          const who = state.data.roster.find((x) => x.id === v.roster_id);
+          if (who && !bgCleared(who)) throw new Error(`${who.name} can't be put on the schedule until their background check is Complete (it's ${BG_LABELS[bgStatus(who)]}).`);
+        }
         if (v.requires_ccw && v.roster_id) {
           const r = state.data.roster.find((x) => x.id === v.roster_id);
           if (!ccwOkOn(r, e.starts_at)) toast(`${r.name} isn't CCW-qualified on this date; the post will be flagged.`, 5000);
@@ -3028,7 +3274,7 @@
     const when = new Date(s.starts_at || e.starts_at);
     const mineReq = p.author_id === state.profile.id;
     const actions = [];
-    if (st.open && me && !mineReq && s.roster_id !== me.id) {
+    if (st.open && me && !mineReq && s.roster_id !== me.id && state.myBgOk) {
       const miss = s.requires_ccw && !ccwOkOn(me, e.starts_at);
       actions.push(h('button', { class: 'btn small primary', onclick: async () => {
         await shiftAction('cover_shift', { p_shift: s.id }, `Cover ${s.post || 'this post'} at ${e.title}?` + (miss ? "\n\nThis post prefers a CCW-qualified person, and you aren't listed as CCW-qualified on this date. You can still take it; it will be flagged." : ''), "You're covering — thanks! The schedule is updated.");
@@ -3486,7 +3732,7 @@
             const sel = h('select', { class: 'input assign-sel' + (dupCells.has(k) || ccwCells.has(k) ? ' warn' : '') + (a.draft[k] === NOT_USED ? ' not-used' : ''), 'aria-label': `${WEEK_LABELS[w - 1]} Sunday, ${s.title}, ${name}` },
               h('option', { value: '' }, '— Open —'),
               h('option', { value: NOT_USED }, '✕ Not used this week'),
-              people.map((r) => h('option', { value: r.id }, r.name + (ccwOkForever(r) ? ' · CCW' : ''))),
+              people.map((r) => h('option', { value: r.id, disabled: !bgCleared(r) && a.draft[k] !== r.id }, r.name + (ccwOkForever(r) ? ' · CCW' : '') + (bgCleared(r) ? '' : ` (check ${BG_LABELS[bgStatus(r)]})`))),
               a.draft[k] && !people.some((r) => r.id === a.draft[k]) ? h('option', { value: a.draft[k] }, rosterName(a.draft[k]) + ' (inactive)') : null);
             sel.value = a.draft[k] || '';
             sel.addEventListener('change', () => { a.draft[k] = sel.value; a.dirty = true; a.result = null; render(); });
@@ -4503,7 +4749,7 @@
           h('div', { class: 'grow' },
             h('div', { class: 'title' }, h('strong', {}, p.full_name)),
             h('div', { class: 'muted small' }, p.email),
-            myContact().phone ? h('div', { class: 'muted small' }, myContact().phone) : null,
+            myContact().phone ? h('div', { class: 'muted small' }, fmtPhone(myContact().phone)) : null,
             h('span', { class: 'badge' + (isAdmin() ? ' bolo' : '') }, ROLE_LABELS[role()] + (state.viewAsMember ? ' (preview)' : ''))),
           h('button', { class: 'btn small', onclick: () => editMyProfile() }, 'Edit profile')),
         profileIncomplete() ? h('p', { class: 'hint' }, 'Add your ' + missingParts().join(' and ') + ' so the team can reach and recognize you.') : null)
@@ -4536,6 +4782,15 @@
         h('a', { class: 'list-item', href: '#/activation' },
           h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Team activation'),
             h('div', { class: 'sub' }, 'Activate the whole security team')),
+          icon('chev'))));
+    }
+    if (isOfficeAdmin() || isAdmin()) {
+      const n = bgFeature() ? state.data.roster.filter((r) => r.active && bgStatus(r) !== 'complete').length : 0;
+      content.push(h('div', { class: 'list' + (isAdmin() ? ' list-tight' : '') },
+        h('a', { class: 'list-item', href: '#/background' },
+          h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Background checks'),
+            h('div', { class: 'sub' }, n ? `${n} not Complete yet` : 'Everyone on the team is Complete')),
+          n && isOfficeAdmin() ? h('span', { class: 'badge caution' }, n) : null,
           icon('chev'))));
     }
     if (realAdmin()) {
@@ -4725,9 +4980,21 @@
           }
           if (p.role === 'admin' && isSuper()) actions.push(roleBtn(p, 'member', 'Remove admin', 'danger', `Remove admin from ${p.full_name || p.email}? They will stay a member.`));
         }
+        if (isSuper() && 'is_office_admin' in p && p.role !== 'pending') {
+          actions.push(h('button', { class: 'btn small' + (p.is_office_admin ? ' danger' : ''), onclick: async (e) => {
+            const on = !p.is_office_admin;
+            if (!confirm(on ? `Make ${p.full_name || p.email} an Office Admin? They'll be able to see and set background checks.` : `Remove Office Admin from ${p.full_name || p.email}?`)) return;
+            e.currentTarget.disabled = true;
+            const { error } = await sb.rpc('set_office_admin', { target: p.id, p_on: on });
+            if (error) { toast(friendlyError(error)); e.currentTarget.disabled = false; return; }
+            if (p.id === state.profile.id) { state.profile.is_office_admin = on; cacheSet('profile', state.profile); await refreshTable('background_checks'); }
+            await afterSave('profiles', `${p.full_name || p.email}: ${on ? 'Office Admin' : 'no longer Office Admin'}`);
+          } }, p.is_office_admin ? 'Remove Office Admin' : 'Make Office Admin'));
+        }
         return h('div', { class: 'user-row' },
           h('div', { class: 'who' },
-            h('div', { class: 'title' }, h('strong', {}, p.full_name || '(no name yet)'), p.id === me ? ' (you)' : ''),
+            h('div', { class: 'title' }, h('strong', {}, p.full_name || '(no name yet)'), p.id === me ? ' (you)' : '',
+              p.is_office_admin ? h('span', { class: 'badge inline info-badge' }, 'Office Admin') : null),
             h('div', { class: 'muted small' }, p.email),
             h('div', { class: 'muted small' }, 'Joined ' + relTime(p.created_at)),
             declaredLine(p)),
@@ -4880,7 +5147,11 @@
       navigator.serviceWorker.register('/sw.js').catch(() => {});
     }
     window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); state.installPrompt = e; });
-    window.addEventListener('hashchange', () => { window.scrollTo(0, 0); render(); });
+    window.addEventListener('hashchange', () => {
+      window.scrollTo(0, 0);
+      render();
+      if (state.pendingScroll != null) { const y = state.pendingScroll; state.pendingScroll = null; requestAnimationFrame(() => window.scrollTo(0, y)); }
+    });
     window.addEventListener('online', () => { render(); if (isMember()) refreshAll(); checkForUpdate({}); });
     setTimeout(() => checkForUpdate({}), 4000);
     setInterval(() => checkForUpdate({}), 30 * 60000);

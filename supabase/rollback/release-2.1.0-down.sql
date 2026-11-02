@@ -1,0 +1,22 @@
+-- Undo 2.1.0's background checks and Office Admin (run in the Supabase SQL
+-- editor after reverting the app). Anyone can be scheduled again. The
+-- statuses the office entered are deleted, so only run this if you mean it.
+-- Note: running schema.sql again afterwards starts background checks over, with
+-- everyone on the roster at that moment marked Complete.
+drop trigger if exists shifts_a_background_check on public.shifts;
+drop function if exists public.shifts_background_check();
+drop trigger if exists roster_background_open on public.roster;
+drop function if exists public.roster_background_open();
+drop function if exists public.set_background_check(uuid, text);
+drop function if exists public.my_background_ok();
+drop function if exists public.background_ok(uuid);
+drop table if exists public.background_checks;
+drop function if exists public.set_office_admin(uuid, boolean);
+drop function if exists public.is_office_admin();
+alter table public.profiles drop column if exists is_office_admin;
+
+-- Contact filters (also added in 2.1.0). Deletes the filters and who's in them.
+drop function if exists public.set_contact_filters(uuid, uuid, uuid[]);
+drop function if exists public.save_contact_filters(jsonb);
+drop table if exists public.contact_filter_members;
+drop table if exists public.contact_filters;
