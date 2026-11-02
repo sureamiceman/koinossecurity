@@ -13,7 +13,9 @@
 //   uploadImage(file) → Promise<path>   stores a picture, returns its path
 //   imageUrl(path)    → url | Promise<url>   something to show it with
 //   pickSop({ current }) → Promise<{ id, title } | { remove: true } | null>
-// Links to other SOPs are ordinary links to "#/sops/<id>".
+//   pickFilter({ current }) → same, for a contact filter ({ id, title })
+// Links to other SOPs are ordinary links to "#/sops/<id>"; links to a group
+// of contacts (a contact filter, e.g. "Medical") go to "#/contacts/<id>".
 import { Editor, Node } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import { TableKit } from '@tiptap/extension-table';
@@ -75,7 +77,8 @@ export function fixWordLists(html) {
 
 export const SOP_HREF = /^#\/sops\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 export const PHOTO_PATH = /^sops\/[A-Za-z0-9-]{1,64}\.(jpg|png|webp)$/;
-const safeUrl = (u) => /^(https?:\/\/|mailto:|tel:)/i.test(String(u || '').trim()) || SOP_HREF.test(String(u || '').trim());
+export const CONTACTS_HREF = /^#\/contacts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+const safeUrl = (u) => /^(https?:\/\/|mailto:|tel:)/i.test(String(u || '').trim()) || SOP_HREF.test(String(u || '').trim()) || CONTACTS_HREF.test(String(u || '').trim());
 
 // A picture on its own line. Click it to select it (then Delete removes it,
 // or drag it somewhere else).
@@ -141,7 +144,7 @@ function el(tag, attrs = {}, ...kids) {
 
 const isImage = (f) => f && /^image\/(jpeg|png|webp|gif|heic|heif)$/i.test(f.type || '');
 
-export function create(container, { html = '', placeholder = '', uploadImage = null, imageUrl = null, pickSop = null } = {}) {
+export function create(container, { html = '', placeholder = '', uploadImage = null, imageUrl = null, pickSop = null, pickFilter = null } = {}) {
   const surface = el('div', { class: 'sop-ed-surface' });
   const bar = el('div', { class: 'sop-ed-bar', role: 'toolbar', 'aria-label': 'Formatting' });
   const tableBar = el('div', { class: 'sop-ed-bar table-bar hidden', role: 'toolbar', 'aria-label': 'Table' });
@@ -224,15 +227,17 @@ export function create(container, { html = '', placeholder = '', uploadImage = n
 
   // Links to other SOPs: pick one from the list. With text selected, that
   // text becomes the link; otherwise the SOP's title is put in as the link.
-  async function linkSop() {
+  const linkSop = () => linkTo(SOP_HREF, pickSop, '#/sops/');
+  const linkFilter = () => linkTo(CONTACTS_HREF, pickFilter, '#/contacts/');
+  async function linkTo(RE, pickFn, prefix) {
     const curHref = editor.getAttributes('link').href || '';
-    const m = SOP_HREF.exec(curHref);
+    const m = RE.exec(curHref);
     const { from, to, empty } = editor.state.selection;
-    const pick = await pickSop({ current: m ? m[1] : null });
+    const pick = await pickFn({ current: m ? m[1] : null });
     if (!pick || editor.isDestroyed) return;
     const c = editor.chain().focus().setTextSelection({ from, to });
     if (pick.remove) { c.extendMarkRange('link').unsetLink().run(); return; }
-    const href = '#/sops/' + pick.id;
+    const href = prefix + pick.id;
     if (m) c.extendMarkRange('link').setLink({ href }).run();
     else if (empty) c.insertContent([{ type: 'text', text: pick.title, marks: [{ type: 'link', attrs: { href } }] }, { type: 'text', text: ' ' }]).run();
     else c.setLink({ href }).run();
@@ -279,8 +284,9 @@ export function create(container, { html = '', placeholder = '', uploadImage = n
     btn('⇤', 'Outdent (Shift+Tab)', () => chain().liftListItem('listItem').run(), null, () => editor.can().liftListItem('listItem')),
     sep(),
     btn('Table', 'Insert a table', () => chain().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(), null, () => !editor.isActive('table')),
-    btn('Link', 'Add or change a web link', promptLink, () => editor.isActive('link') && !SOP_HREF.test(editor.getAttributes('link').href || '')),
+    btn('Link', 'Add or change a web link', promptLink, () => editor.isActive('link') && !SOP_HREF.test(editor.getAttributes('link').href || '') && !CONTACTS_HREF.test(editor.getAttributes('link').href || '')),
     pickSop ? btn('SOP link', 'Link to another SOP', linkSop, () => SOP_HREF.test(editor.getAttributes('link').href || '')) : null,
+    pickFilter ? btn('Contacts link', 'Link to a group of contacts (e.g. Medical)', linkFilter, () => CONTACTS_HREF.test(editor.getAttributes('link').href || '')) : null,
     uploadImage ? btn(picBtnLabel, 'Add a picture or map (you can also paste or drag one in)', () => fileInput.click(), null, () => !busy) : null,
     btn('―', 'Divider line', () => chain().setHorizontalRule().run()),
     btn('Quote', 'Note / quote block', () => chain().toggleBlockquote().run(), () => editor.isActive('blockquote')),

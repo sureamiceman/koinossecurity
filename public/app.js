@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [], app_settings: [], background_checks: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [], app_settings: [], background_checks: [], contact_filters: [], contact_filter_members: [] });
   const state = {
     session: null,
     profile: null,
@@ -291,7 +291,18 @@
         if (n.tagName === 'A') {
           const href = (n.getAttribute('href') || '').trim();
           const sm = SOP_HREF.exec(href);
-          if (sm) {
+          const cm = CONTACTS_HREF.exec(href);
+          if (cm) {
+            // A link to a group of contacts: opens Contacts on that filter's tab.
+            const fl = filterById(cm[1].toLowerCase());
+            if (!fl) {
+              // Deleted, or an "Admins only" filter this person can't see.
+              const span = h('span', { class: isAdmin() ? 'sop-link-gone' : '', title: isAdmin() ? 'The linked contact filter was deleted' : null });
+              copy(n, span); to.append(span); continue;
+            }
+            el.setAttribute('href', '#/contacts/' + fl.id);
+            el.className = `sop-link contact-link tc-${fl.color}`;
+          } else if (sm) {
             // A link to another SOP: opens it in the app. Shows in that SOP's tab color.
             const target = visibleSops().find((x) => x.id === sm[1].toLowerCase());
             if (!target && state.data.sops.some((x) => x.id === sm[1].toLowerCase())) {   // hidden while Teams is off: just the words
@@ -477,10 +488,12 @@
     teams: (t) => t.select('*').order('sort_order'),
     team_activations: (t) => t.select('*').order('created_at', { ascending: false }).limit(10),
     app_settings: (t) => t.select('*'),
-    background_checks: (t) => t.select('*')   // only admins and Office Admins get rows
+    background_checks: (t) => t.select('*'),   // only admins and Office Admins get rows
+    contact_filters: (t) => t.select('*').order('sort_order'),   // "Admins only" filters come back to admins only
+    contact_filter_members: (t) => t.select('*')
   };
   const attSince = () => isoDay(new Date(Date.now() - 200 * 864e5));
-  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'app_settings', 'background_checks', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
+  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'app_settings', 'background_checks', 'contact_filters', 'contact_filter_members', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
 
   function loadCachedData() {
     if (cacheGet('myBgOk') === false) state.myBgOk = false;
@@ -801,6 +814,32 @@
     dlg.showModal();
   }
 
+  // Pick a contact filter to link to (from the SOP editor).
+  function pickFilterDialog({ current }) {
+    return new Promise((resolve) => {
+      let result = null;
+      const dlg = h('dialog', { class: 'sop-picker' });
+      const choose = (r) => { result = r; dlg.close(); };
+      const list = filtersSorted();
+      append(dlg, [
+        h('div', { class: 'dlg-head' }, h('h2', {}, 'Link to contacts'),
+          h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: () => dlg.close() }, icon('x'))),
+        h('div', { class: 'dlg-body' },
+          h('p', { class: 'muted small' }, 'Readers tap the link to see who\'s in the group right now (with Call and Text), then Return to SOP. Tip: select words first to make them the link; otherwise the filter\'s name is put in.'),
+          list.length ? h('div', { class: 'sop-picker-list' }, list.map((f) => h('button', { type: 'button', class: `sop-picker-item tc-${f.color}` + (f.id === current ? ' on' : ''), onclick: () => choose({ id: f.id, title: f.name }) },
+            h('span', { class: 'grow' }, f.name), f.admins_only ? h('span', { class: 'muted small' }, 'admins only') : null, f.id === current ? h('span', { class: 'muted small' }, 'linked now') : null)))
+            : h('div', { class: 'sop-empty' }, 'No contact filters yet. Add them on the Contacts page (Edit filters).')),
+        h('div', { class: 'dlg-foot' },
+          current ? h('button', { type: 'button', class: 'btn danger', onclick: () => choose({ remove: true }) }, 'Remove link') : null,
+          h('div', { class: 'spacer' }),
+          h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Cancel'))
+      ]);
+      dlg.addEventListener('close', () => { dlg.remove(); resolve(result); });
+      document.body.append(dlg);
+      dlg.showModal();
+    });
+  }
+
   // Pick an SOP to link to (from the SOP editor). Resolves { id, title },
   // { remove: true } or null.
   function pickSopDialog({ current }, excludeId) {
@@ -1072,10 +1111,14 @@
   }
 
   async function saveRow(table, id, row) {
-    const { error } = id
-      ? await sb.from(table).update(row).eq('id', id)
-      : await sb.from(table).insert(row);
+    if (id) {
+      const { error } = await sb.from(table).update(row).eq('id', id);
+      if (error) throw error;
+      return id;
+    }
+    const { data, error } = await sb.from(table).insert(row).select('id').single();
     if (error) throw error;
+    return data && data.id;
   }
   async function deleteRow(table, id) {
     const { error } = await sb.from(table).delete().eq('id', id);
@@ -1340,6 +1383,7 @@
     if ((tab === 'users' || tab === 'assignments') && !isAdmin()) tab = 'more';
     if (tab === 'attendance-setup' && !isAdmin()) tab = 'attendance';
     if (tab === 'background' && !(isAdmin() || isOfficeAdmin())) tab = 'more';
+    if (tab !== 'contacts' && state.returnTo && !(tab === 'sops' && '#/sops/' + id === state.returnTo.hash)) state.returnTo = null;
     if (tab === 'teams' && (!isAdmin() || !teamsEnabled())) tab = 'contacts';
     if (tab === 'team') {   // the old Team tab: now Contacts → Security Team
       tab = 'contacts'; state.contactQuery = '';
@@ -1568,8 +1612,8 @@
 
   // Admins: name, color and order the tabs.
   // Shared tab editor (SOP tabs, Contact tabs): name, color and order.
-  function tabEditor({ title, intro, tabs, countOf, itemWord, rpc, onSaved }) {
-    const rows = tabs.map((t) => ({ id: t.id || null, name: t.name, color: t.color, k: Math.random().toString(36).slice(2) }));
+  function tabEditor({ title, intro, tabs, countOf, itemWord, rpc, onSaved, visibility = false, allowNone = false, removeText = null, addLabel = '+ Add tab', savedText = 'Tabs saved' }) {
+    const rows = tabs.map((t) => ({ id: t.id || null, name: t.name, color: t.color, admins_only: !!t.admins_only, k: Math.random().toString(36).slice(2) }));
     const list = h('div', { class: 'tab-editor' });
     const draw = () => {
       list.replaceChildren(...rows.map((r, i) => {
@@ -1591,12 +1635,19 @@
             h('button', { type: 'button', class: 'icon-btn mini', 'aria-label': 'Move down', disabled: i === rows.length - 1 || null, onclick: () => { [rows[i + 1], rows[i]] = [rows[i], rows[i + 1]]; draw(); } }, '↓'),
             h('button', {
               type: 'button', class: 'icon-btn mini', 'aria-label': 'Remove tab', onclick: () => {
-                if (rows.length === 1) { toast('Keep at least one tab.'); return; }
+                if (rows.length === 1 && !allowNone) { toast('Keep at least one tab.'); return; }
                 const dest = rows.find((x) => x !== r);
-                if (n && !confirm(`${n} ${itemWord}${n > 1 ? 's' : ''} in "${r.name}" will move to "${dest.name}" (the first tab) when you save. Remove the tab?`)) return;
+                if (removeText) { if (r.id && !confirm(removeText(r, n))) return; }
+                else if (n && !confirm(`${n} ${itemWord}${n > 1 ? 's' : ''} in "${r.name}" will move to "${dest.name}" (the first tab) when you save. Remove the tab?`)) return;
                 rows.splice(i, 1); draw();
               }
             }, icon('x'))),
+          visibility ? h('label', { class: 'te-vis' }, (() => {
+            const cb = h('input', { type: 'checkbox' });
+            cb.checked = r.admins_only;
+            cb.addEventListener('change', () => { r.admins_only = cb.checked; });
+            return cb;
+          })(), 'Admins only (hidden from members)') : null,
           palette);
       }));
     };
@@ -1606,22 +1657,22 @@
       body: [
         h('p', { class: 'muted small dlg-intro' }, intro),
         list,
-        h('button', { type: 'button', class: 'btn small', onclick: () => { const r = { id: null, name: '', color: 'gray', k: Math.random().toString(36).slice(2) }; rows.push(r); draw(); const el = document.getElementById('te_' + r.k); if (el) el.focus(); } }, '+ Add tab')
+        h('button', { type: 'button', class: 'btn small', onclick: () => { const r = { id: null, name: '', color: 'gray', k: Math.random().toString(36).slice(2) }; rows.push(r); draw(); const el = document.getElementById('te_' + r.k); if (el) el.focus(); } }, addLabel)
       ],
       buttons: (close) => [
         h('button', { class: 'btn', onclick: close }, 'Cancel'),
         h('button', {
           class: 'btn primary', onclick: async (e) => {
             const btn = e.currentTarget;
-            const clean = rows.map((r) => ({ id: r.id, name: r.name.trim(), color: r.color }));
-            if (clean.some((r) => !r.name)) { toast('Every tab needs a name.'); return; }
+            const clean = rows.map((r) => ({ id: r.id, name: r.name.trim(), color: r.color, ...(visibility ? { admins_only: r.admins_only } : {}) }));
+            if (clean.some((r) => !r.name)) { toast('Every one needs a name.'); return; }
             btn.disabled = true;
             const { error } = await sb.rpc(rpc, { p: clean });
             if (error) { toast(friendlyError(error), 6000); btn.disabled = false; return; }
             close();
             await onSaved(clean);
             render();
-            toast('Tabs saved');
+            toast(savedText);
           }
         }, 'Save')
       ]
@@ -1656,7 +1707,12 @@
     const from = sopById(trail[trail.length - 1]);
     if (trail.length && !from) trail.length = 0;
     const body = sopBody(s.body, s.format, 'sop-body');
-    body.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('a.sop-link')) state.sopTrail.push(s.id); });
+    body.addEventListener('click', (e) => {
+      const a = e.target.closest && e.target.closest('a.sop-link');
+      if (!a) return;
+      if (a.classList.contains('contact-link')) state.returnTo = { hash: '#/sops/' + s.id, title: s.title, scroll: window.scrollY };
+      else state.sopTrail.push(s.id);
+    });
     // Other SOPs that link here.
     const needle = '#/sops/' + s.id;
     const linkedFrom = visibleSops().filter((x) => x.id !== s.id && x.format === 'html' && String(x.body || '').toLowerCase().includes(needle)).sort((a, b) => a.title.localeCompare(b.title));
@@ -1752,7 +1808,8 @@
             placeholder: 'Write the procedure. Tip: paste from Word or Google Docs to keep lists and tables.',
             uploadImage: async (file) => { const p = await uploadSopImage(file); uploaded.push(p); return p; },
             imageUrl: (p) => sopImageUrl(p),
-            pickSop: (o) => pickSopDialog(o, s.id)
+            pickSop: (o) => pickSopDialog(o, s.id),
+            pickFilter: (o) => pickFilterDialog(o)
           });
           return {
             get: () => (ed.isEmpty() ? '' : ed.getHTML()),
@@ -1842,35 +1899,108 @@
   const byName = (a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name);
   const byAlpha = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
 
-  function contactsView() {
-    const search = h('input', { class: 'search', type: 'search', placeholder: 'Search contacts', 'aria-label': 'Search contacts' });
-    search.value = state.contactQuery || '';
-    const wrap = h('div', {});
-    const draw = () => { wrap.replaceChildren(); append(wrap, contactList()); };
-    search.addEventListener('input', () => { state.contactQuery = search.value; draw(); });
-    draw();
-    return { title: 'Contacts', action: isAdmin() ? topAction('+ New', addContact) : null, content: [search, wrap] };
+  // ---- Contact filters (admin-made groups shown as tabs; linkable from SOPs) ----
+  // (The database already hides "Admins only" filters from members; this also hides them in View as member.)
+  const visibleFilters = () => state.data.contact_filters.filter((f) => isAdmin() || !f.admins_only);
+  const filtersSorted = () => visibleFilters().sort((a, b) => a.sort_order - b.sort_order);
+  const filterById = (id) => visibleFilters().find((f) => f.id === id);
+  const filterIdsOf = (kind, id) => state.data.contact_filter_members.filter((m) => (kind === 'r' ? m.roster_id : m.contact_id) === id).map((m) => m.filter_id);
+  const inFilter = (f, kind, id) => state.data.contact_filter_members.some((m) => m.filter_id === f.id && (kind === 'r' ? m.roster_id : m.contact_id) === id);
+  const CONTACTS_HREF = /^#\/contacts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+  function editContactFilters() {
+    tabEditor({
+      title: 'Edit contact filters',
+      intro: 'Filters are the tabs on the Contacts page (e.g. Medical, Pastor, Church Staff). Tick who belongs in each on the person\'s Edit form; someone can be in several. "Admins only" filters (e.g. CCW) are hidden from everyone else. SOPs can link to a filter with the Contacts link button.',
+      tabs: filtersSorted(), itemWord: 'person', rpc: 'save_contact_filters', visibility: true, allowNone: true,
+      addLabel: '+ Add filter', savedText: 'Filters saved',
+      countOf: (name) => { const f = state.data.contact_filters.find((x) => x.name === name); return f ? state.data.contact_filter_members.filter((m) => m.filter_id === f.id).length : 0; },
+      removeText: (r, n) => `Delete the "${r.name}" filter?${n ? ` ${n} ${n > 1 ? 'people are' : 'person is'} in it (they stay in Contacts).` : ''} SOP links to it will show crossed out.`,
+      onSaved: async () => { await Promise.all([refreshTable('contact_filters'), refreshTable('contact_filter_members')]); }
+    });
   }
 
-  function contactList() {
+  // Checkbox chips on a person's / contact's Edit form (admins).
+  function filtersField(kind, id) {
+    return { name: 'filters', label: 'Contact filters', type: 'custom', build: (box) => {
+      const chosen = new Set(id ? filterIdsOf(kind, id) : []);
+      const list = filtersSorted();
+      if (!list.length) box.append(h('div', { class: 'muted small' }, 'No filters yet. Add them with Edit filters at the bottom of the Contacts page.'));
+      for (const f of list) {
+        const cb = h('input', { type: 'checkbox' });
+        cb.checked = chosen.has(f.id);
+        cb.addEventListener('change', () => { if (cb.checked) chosen.add(f.id); else chosen.delete(f.id); });
+        box.append(h('label', { class: `filter-chip tc-${f.color}` }, cb, f.name, f.admins_only ? h('span', { class: 'muted tiny' }, ' (admins only)') : null));
+      }
+      return { get: () => [...chosen] };
+    } };
+  }
+  async function saveFilters(kind, id, ids) {
+    if (!id || !Array.isArray(ids) || !state.data.contact_filters.length) return;
+    const before = filterIdsOf(kind, id).sort().join();
+    if (before === ids.slice().sort().join()) return;
+    const { error } = await sb.rpc('set_contact_filters', { p_roster: kind === 'r' ? id : null, p_contact: kind === 'c' ? id : null, p_filters: ids });
+    if (error) throw error;
+    await refreshTable('contact_filter_members');
+  }
+
+  // #/contacts = All, #/contacts/<filter id> = that filter's tab.
+  function contactsView(filterId) {
+    const f = filterId && filterById(filterId);
+    const search = h('input', { class: 'search', type: 'search', placeholder: f ? `Search ${f.name}` : 'Search contacts', 'aria-label': 'Search contacts' });
+    search.value = state.contactQuery || '';
+    const wrap = h('div', {});
+    const draw = () => { wrap.replaceChildren(); append(wrap, contactList(f)); };
+    search.addEventListener('input', () => { state.contactQuery = search.value; draw(); });
+    draw();
+    const ret = state.returnTo;
+    const back = ret ? h('button', { type: 'button', class: 'return-bar', onclick: () => returnToSop() },
+      h('span', { class: 'rb-arrow', 'aria-hidden': 'true' }, '‹'), h('span', { class: 'grow' }, h('span', { class: 'small' }, 'Return to SOP'), h('strong', {}, ret.title))) : null;
+    return { title: f ? f.name : 'Contacts', action: isAdmin() ? topAction('+ New', addContact) : null, content: [back, search, wrap] };
+  }
+  function returnToSop() {
+    const ret = state.returnTo;
+    if (!ret) return;
+    state.pendingScroll = ret.scroll;
+    state.returnTo = null;
+    location.hash = ret.hash;
+  }
+
+  function contactList(f) {
     const ql = (state.contactQuery || '').trim().toLowerCase();
-    const people = state.data.roster.filter((r) => r.active || isAdmin());
-    const others = state.data.contacts;
+    let people = state.data.roster.filter((r) => r.active || isAdmin());
+    let others = state.data.contacts;
+    if (f) {
+      people = people.filter((r) => inFilter(f, 'r', r.id) && r.active);
+      others = others.filter((c) => inFilter(f, 'c', c.id));
+    }
     const pText = (r) => `${r.name} ${r.position} ${r.phone} ${r.email} ${r.is_medical ? 'medical ' + (r.medical_notes || '') : ''} ${r.ccw_qualified && isAdmin() ? 'ccw' : ''} ${(teamOfPerson(r) || {}).name || ''}`;
     const cText = (c) => `${c.name} ${c.organization} ${c.phone} ${c.alt_phone} ${plainText(c.notes)}`;
     const rows = [
       ...people.filter((r) => !ql || pText(r).toLowerCase().includes(ql)).map((r) => ({ name: r.name, inactive: !r.active, el: () => personRow(r) })),
       ...others.filter((c) => !ql || cText(c).toLowerCase().includes(ql)).map((c) => ({ name: c.name, el: () => contactRow(c) }))
     ].sort((a, b) => (a.inactive ? 1 : 0) - (b.inactive ? 1 : 0) || byAlpha(a, b));
-    const out = [];
-    // Admins: CCW qualifications that need attention.
-    const problems = isAdmin() ? state.data.roster.filter((r) => r.active && ccwStatus(r) && ccwStatus(r).problem) : [];
-    if (problems.length && !ql) out.push(h('div', { class: 'notice' },
+    const panelBody = [];
+    // Admins: CCW qualifications that need attention (on All only).
+    const problems = isAdmin() && !f ? state.data.roster.filter((r) => r.active && ccwStatus(r) && ccwStatus(r).problem) : [];
+    if (problems.length && !ql) panelBody.push(h('div', { class: 'notice' },
       `${problems.length} CCW qualification${problems.length > 1 ? 's' : ''} expired, expiring within ${CCW_WARN_DAYS} days, or missing a date: ${problems.map((r) => r.name).join(', ')}`));
-    out.push(rows.length ? h('div', { class: 'list contact-list' }, rows.map((r) => r.el()))
-      : empty(ql ? 'No contacts match your search.' : 'No contacts yet.', 'phone'));
-    if (!ql) out.push(h('p', { class: 'muted small contact-count' }, `${people.filter((r) => r.active).length} on the Security Team · ${others.length} other contact${others.length === 1 ? '' : 's'}`));
-    return out;
+    panelBody.push(rows.length ? h('div', { class: 'list flat contact-list' }, rows.map((r) => r.el()))
+      : h('div', { class: 'sop-empty' }, ql ? 'No contacts match your search.' : f ? `Nobody is in ${f.name} yet.${isAdmin() ? ' Tick it on a person\'s Edit form.' : ''}` : 'No contacts yet.'));
+    const filters = filtersSorted();
+    const count = f ? `${rows.length}` : `${people.filter((r) => r.active).length} on the Security Team · ${others.length} other${others.length === 1 ? '' : 's'}`;
+    const panel = h('section', { class: `sop-panel tc-${f ? f.color : 'gray'}` },
+      h('div', { class: 'sop-panel-head' }, h('h2', {}, f ? f.name : 'All contacts', f && f.admins_only ? h('span', { class: 'badge inline muted-badge' }, 'Admins only') : null), h('span', { class: 'muted small' }, count)),
+      panelBody,
+      isAdmin() ? h('div', { class: 'sop-panel-foot' }, h('button', { class: 'btn small', onclick: editContactFilters }, filters.length ? 'Edit filters' : '+ Add filters')) : null);
+    if (!filters.length) return [panel];
+    // Tabs down the right side: All, then the filters.
+    const tab = (key, name, color) => h('a', {
+      class: `sop-tab tc-${color}` + ((f ? f.id : null) === key ? ' on' : ''), href: key ? '#/contacts/' + key : '#/contacts',
+      'aria-current': (f ? f.id : null) === key ? 'page' : null, title: name,
+      onclick: (e) => { e.preventDefault(); state.contactQuery = ''; location.replace(key ? '#/contacts/' + key : '#/contacts'); }
+    }, h('span', {}, name));
+    return [h('div', { class: 'rolodex' }, panel, h('nav', { class: 'sop-rail', 'aria-label': 'Contact filters' }, tab(null, 'All', 'gray'), filters.map((x) => tab(x.id, x.name, x.color))))];
   }
 
   // Admins: + New → a Security Team member (can be linked to an app account,
@@ -1896,10 +2026,13 @@
         { name: 'organization', label: 'Organization / role' },
         { name: 'phone', label: 'Phone', type: 'tel', autocomplete: 'tel', inputmode: 'tel' },
         { name: 'alt_phone', label: 'Alternate phone', type: 'tel', inputmode: 'tel' },
-        { name: 'notes', label: 'Notes', type: 'textarea', rows: 3 }
-      ],
+        { name: 'notes', label: 'Notes', type: 'textarea', rows: 3 },
+        state.data.contact_filters.length ? filtersField('c', c.id) : null
+      ].filter(Boolean),
       onSubmit: async (v) => {
-        await saveRow('contacts', c.id, v);
+        const ids = v.filters; delete v.filters;
+        const id = await saveRow('contacts', c.id, v);
+        await saveFilters('c', id, ids);
         await afterSave('contacts', 'Contact saved');
       },
       onDelete: isNew ? null : async () => { await deleteRow('contacts', c.id); await afterSave('contacts', 'Contact deleted'); }
@@ -2033,6 +2166,8 @@
         c ? h('div', { class: 'card' },
           h('span', { class: 'badge ' + c.cls }, c.label === 'CCW' ? 'CCW qualified' : c.label),
           h('div', { class: 'body-text' }, c.detail)) : null,
+        filterIdsOf('r', p.id).length ? h('div', { class: 'filter-chips' }, filtersSorted().filter((f) => inFilter(f, 'r', p.id)).map((f) =>
+          h('a', { class: `sop-chip tc-${f.color}`, href: '#/contacts/' + f.id, onclick: () => { const d = document.querySelector('dialog[open]'); if (d) d.close(); } }, f.name))) : null,
         canSeeBg() ? h('div', { class: 'card bg-card' }, h('div', { class: 'row' },
           h('div', { class: 'grow' }, h('strong', {}, 'Background check: '), BG_LABELS[bgStatus(p)],
             bgStatus(p) !== 'complete' ? h('div', { class: 'muted small' }, "Can't be put on the schedule until it's Complete.") : null),
@@ -2089,6 +2224,7 @@
           options: [['', 'Not linked'], ...accounts.map((a) => [a.id, `${a.full_name || '(no name)'} — ${a.email}`])],
           hint: 'Link the person\'s sign-in so they can see "My assignments" and volunteer or swap. Left blank, it links automatically when the email matches.' },
         { name: 'declared', label: '', type: 'custom', build: declaredHelper },
+        ...(state.data.contact_filters.length ? [filtersField('r', p.id)] : []),
         { name: 'photo', label: 'Photo', type: 'photo', currentUrl: p.photo_path ? state.photoUrls[p.photo_path] : null },
         { name: 'is_medical', label: 'Show on the Medical tab (medical point of contact)', type: 'checkbox' },
         { name: 'medical_notes', label: 'Medical qualifications', placeholder: 'e.g. RN, EMT, CPR/AED certified', visible: (v) => v.is_medical, hint: 'Shown under their name on the Medical tab.' },
@@ -2099,6 +2235,7 @@
       ],
       onSubmit: async (v, photo) => {
         delete v.declared;
+        const filterIds = v.filters; delete v.filters;
         if (!v.profile_id && v.email) {
           const match = accounts.find((a) => a.email && a.email.toLowerCase() === v.email.toLowerCase());
           const taken = match && state.data.roster.some((r) => r.profile_id === match.id && r.id !== p.id);
@@ -2108,14 +2245,16 @@
         const ph = await applyPhoto('roster', p.photo_path, photo);
         const row = { ...v, profile_id: v.profile_id || null, ccw_expires_on: v.ccw_expires_on || null, photo_path: ph.path };
         if ('team_id' in v) row.team_id = v.team_id || null;
+        let savedId = p.id;
         try {
-          await saveRow('roster', p.id, row);
+          savedId = await saveRow('roster', p.id, row);
         } catch (e) {
           if (ph.path && ph.path !== p.photo_path) removePhoto(ph.path);
           if (/roster_profile_id_key|duplicate key/i.test(e.message || '')) throw new Error('That app account is already linked to another roster entry.');
           throw e;
         }
         removePhoto(ph.oldToRemove);
+        await saveFilters('r', savedId, filterIds);
         if (row.profile_id && row.profile_id !== p.profile_id) notifyServer(); // welcome post
         await afterSave('roster', isNew ? 'Team member added' : 'Saved');
         refreshTable('posts');
@@ -5008,7 +5147,11 @@
       navigator.serviceWorker.register('/sw.js').catch(() => {});
     }
     window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); state.installPrompt = e; });
-    window.addEventListener('hashchange', () => { window.scrollTo(0, 0); render(); });
+    window.addEventListener('hashchange', () => {
+      window.scrollTo(0, 0);
+      render();
+      if (state.pendingScroll != null) { const y = state.pendingScroll; state.pendingScroll = null; requestAnimationFrame(() => window.scrollTo(0, y)); }
+    });
     window.addEventListener('online', () => { render(); if (isMember()) refreshAll(); checkForUpdate({}); });
     setTimeout(() => checkForUpdate({}), 4000);
     setInterval(() => checkForUpdate({}), 30 * 60000);

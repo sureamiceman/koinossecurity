@@ -12,3 +12,9 @@ drop table if exists public.background_checks;
 drop function if exists public.set_office_admin(uuid, boolean);
 drop function if exists public.is_office_admin();
 alter table public.profiles drop column if exists is_office_admin;
+
+-- Contact filters (also added in 2.1.0). Deletes the filters and who's in them.
+drop function if exists public.set_contact_filters(uuid, uuid, uuid[]);
+drop function if exists public.save_contact_filters(jsonb);
+drop table if exists public.contact_filter_members;
+drop table if exists public.contact_filters;

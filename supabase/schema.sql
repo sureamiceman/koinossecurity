@@ -2617,3 +2617,86 @@ end $$;
 drop trigger if exists shifts_a_background_check on public.shifts;
 create trigger shifts_a_background_check before insert or update of roster_id on public.shifts
   for each row execute function public.shifts_background_check();
+
+-- ---------------------------------------------------------------------
+-- Contact filters: admin-made groups (Medical, Pastor, Church Staff…) that
+-- show as tabs on the Contacts page and can be linked from SOPs
+-- ("#/contacts/<filter id>"). Admins tick who's in each, by hand; a person
+-- can be in any number. "Admins only" filters (e.g. CCW) are invisible to
+-- everyone else, names and members alike.
+-- ---------------------------------------------------------------------
+create table if not exists public.contact_filters (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  color       text not null default 'blue'
+              check (color in ('red','orange','yellow','green','teal','blue','purple','pink','gray')),
+  sort_order  int  not null default 0,
+  admins_only boolean not null default false,
+  created_at  timestamptz not null default now()
+);
+create unique index if not exists contact_filters_name_key on public.contact_filters (lower(name));
+
+create table if not exists public.contact_filter_members (
+  filter_id   uuid not null references public.contact_filters(id) on delete cascade,
+  roster_id   uuid references public.roster(id) on delete cascade,
+  contact_id  uuid references public.contacts(id) on delete cascade,
+  check ((roster_id is null) <> (contact_id is null))
+);
+create unique index if not exists contact_filter_members_roster_key on public.contact_filter_members (filter_id, roster_id) where roster_id is not null;
+create unique index if not exists contact_filter_members_contact_key on public.contact_filter_members (filter_id, contact_id) where contact_id is not null;
+
+alter table public.contact_filters enable row level security;
+alter table public.contact_filter_members enable row level security;
+drop policy if exists contact_filters_select on public.contact_filters;
+create policy contact_filters_select on public.contact_filters for select to authenticated
+  using (public.is_admin() or (public.is_member() and not admins_only));
+drop policy if exists contact_filter_members_select on public.contact_filter_members;
+create policy contact_filter_members_select on public.contact_filter_members for select to authenticated
+  using (public.is_admin() or (public.is_member() and exists (
+    select 1 from public.contact_filters f where f.id = filter_id and not f.admins_only)));
+-- No direct writes: admins use the two functions below.
+
+-- Save the list of filters: p = [{id?, name, color, admins_only}] in order.
+-- Filters left out are deleted (their SOP links then show crossed out).
+create or replace function public.save_contact_filters(p jsonb) returns void
+language plpgsql security definer set search_path = public as $$
+declare j jsonb; n int := 0; kept uuid[] := '{}'; fid uuid; nm text;
+begin
+  if not public.is_admin() then raise exception 'Only admins can change contact filters'; end if;
+  if jsonb_typeof(p) <> 'array' then raise exception 'Invalid filters'; end if;
+  for j in select * from jsonb_array_elements(p) loop
+    nm := left(trim(coalesce(j->>'name', '')), 40);
+    if nm = '' then raise exception 'Every filter needs a name.'; end if;
+    fid := nullif(j->>'id', '')::uuid;
+    if fid is not null and exists (select 1 from public.contact_filters where id = fid) then
+      update public.contact_filters set name = nm, color = coalesce(nullif(j->>'color', ''), color),
+             admins_only = coalesce((j->>'admins_only')::boolean, false), sort_order = n
+       where id = fid;
+    else
+      insert into public.contact_filters (name, color, admins_only, sort_order)
+      values (nm, coalesce(nullif(j->>'color', ''), 'blue'), coalesce((j->>'admins_only')::boolean, false), n)
+      returning id into fid;
+    end if;
+    kept := kept || fid;
+    n := n + 1;
+  end loop;
+  delete from public.contact_filters where not (id = any(kept));
+exception when unique_violation then
+  raise exception 'Two filters have the same name.';
+end $$;
+revoke all on function public.save_contact_filters(jsonb) from public, anon;
+grant execute on function public.save_contact_filters(jsonb) to authenticated;
+
+-- Set which filters one person is in (a team member or an outside contact).
+create or replace function public.set_contact_filters(p_roster uuid, p_contact uuid, p_filters uuid[]) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_admin() then raise exception 'Only admins can assign contact filters'; end if;
+  if (p_roster is null) = (p_contact is null) then raise exception 'Pick one person'; end if;
+  delete from public.contact_filter_members
+   where (p_roster is not null and roster_id = p_roster) or (p_contact is not null and contact_id = p_contact);
+  insert into public.contact_filter_members (filter_id, roster_id, contact_id)
+  select f.id, p_roster, p_contact from public.contact_filters f where f.id = any(coalesce(p_filters, '{}'));
+end $$;
+revoke all on function public.set_contact_filters(uuid, uuid, uuid[]) from public, anon;
+grant execute on function public.set_contact_filters(uuid, uuid, uuid[]) to authenticated;
