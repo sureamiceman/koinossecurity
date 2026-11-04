@@ -83,6 +83,7 @@
     mail: ['M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z', 'M22 6l-10 7L2 6'],
     shield: ['M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'],
     calendar: ['M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z', 'M16 2v4', 'M8 2v4', 'M3 10h18'],
+    globe: ['M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20z', 'M2 12h20', 'M12 2a15.3 15.3 0 0 1 4 10a15.3 15.3 0 0 1-4 10a15.3 15.3 0 0 1-4-10a15.3 15.3 0 0 1 4-10z'],
     clipboard: ['M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2', 'M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z', 'M9 12h6', 'M9 16h4']
   };
   function icon(name) {
@@ -1343,8 +1344,9 @@
   // ------------------------------------------------------------------
   const TABS = [
     ['alerts', 'Alerts', 'bell'],
-    ['schedule', 'Schedule', 'calendar'],
+    ['schedule', 'Sched', 'calendar'],
     ['sops', 'SOPs', 'book'],
+    ['map', 'Map', 'globe'],
     ['board', 'Board', 'msg'],
     ['contacts', 'Contacts', 'phone'],
     ['attendance', 'Count', 'clipboard'],
@@ -1394,7 +1396,7 @@
     }
     const views = { alerts: alertsView, schedule: scheduleView, confirm: confirmView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView, teams: teamsAdminView, activation: activationView, background: backgroundView, map: mapView };
     const v = (views[tab] || alertsView)(id, sub);
-    const activeTab = (tab === 'users' || tab === 'background' || tab === 'map') ? 'more' : (tab === 'assignments' || tab === 'confirm') ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : tab === 'teams' ? 'contacts' : tab === 'activation' ? 'alerts' : (views[tab] ? tab : 'alerts');
+    const activeTab = (tab === 'users' || tab === 'background') ? 'more' : (tab === 'assignments' || tab === 'confirm') ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : tab === 'teams' ? 'contacts' : tab === 'activation' ? 'alerts' : (views[tab] ? tab : 'alerts');
 
     if (activeTab === 'alerts') {
       state.lastSeenAlerts = Date.now();
@@ -4745,7 +4747,7 @@
   }
 
   // ------------------------------------------------------------------
-  // Site map (More → Site map): the aerial photo and the traced floorplan in
+  // Site map (the Map tab): the aerial photo and the traced floorplan in
   // layers (parking, areas we can't use, team zones, exit routes, exits,
   // equipment, utilities). The map itself (one file, ~600 KB) is loaded by an
   // admin with "Import map file" and kept in the database, never in this
@@ -5206,9 +5208,9 @@
   function mapView() {
     const m = mapState();
     ensureSiteMap();
-    if (m.error === 'missing') return { title: 'Site map', back: '#/more', content: [h('div', { class: 'notice' }, 'The database needs updating for the site map (run supabase/schema.sql).')] };
+    if (m.error === 'missing') return { title: 'Site map', content: [h('div', { class: 'notice' }, 'The database needs updating for the site map (run supabase/schema.sql).')] };
     if (!m.data) {
-      return { title: 'Site map', back: '#/more', content: [
+      return { title: 'Site map', content: [
         m.loading || !m.checked ? h('div', { class: 'empty' }, h('div', { class: 'spinner' })) : empty("The site map hasn't been set up yet." + (isAdmin() ? '' : ' An admin loads it from this screen.'), 'shield'),
         isAdmin() && m.checked ? importCard() : null] };
     }
@@ -5262,7 +5264,7 @@
     }
     content.push(h('div', { class: 'section-title' }, 'Layers'), mapLayersCard());
     if (isAdmin()) content.push(h('div', { class: 'section-title' }, 'Map file'), importCard());
-    return { title: 'Site map', back: '#/more', content };
+    return { title: 'Site map', content };
   }
 
   function moreView() {
@@ -5317,11 +5319,6 @@
           n && isOfficeAdmin() ? h('span', { class: 'badge caution' }, n) : null,
           icon('chev'))));
     }
-    content.push(h('div', { class: 'list' + (isAdmin() || isOfficeAdmin() ? ' list-tight' : '') },
-      h('a', { class: 'list-item', href: '#/map' },
-        h('div', { class: 'grow' }, h('div', { class: 'title' }, 'Site map'),
-          h('div', { class: 'sub' }, 'Floorplan, exits and routes, team zones, equipment')),
-        icon('chev'))));
     if (realAdmin()) {
       content.push(h('div', { class: 'card view-as-card' },
         h('div', { class: 'row' },

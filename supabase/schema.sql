@@ -2702,10 +2702,10 @@ revoke all on function public.set_contact_filters(uuid, uuid, uuid[]) from publi
 grant execute on function public.set_contact_filters(uuid, uuid, uuid[]) to authenticated;
 
 -- ---------------------------------------------------------------------
--- Site map (2.2.0): the layered floorplan under More → Site map.
+-- Site map (2.2.0): the layered floorplan on the Map tab.
 --   site_map     one row: the map itself (aerial photo, traced floorplan,
 --                areas, exit routes, exit rules), loaded by an admin with
---                More → Site map → Import map file. It is NOT in this repo:
+--                Map → Load the site map. It is NOT in this repo:
 --                the repo is public and the layout of the building is not.
 --   map_areas    each room / hallway on the map: its name, which team's
 --                zone it is in, "not our space", and merges (several areas
