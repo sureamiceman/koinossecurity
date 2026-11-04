@@ -2700,3 +2700,149 @@ begin
 end $$;
 revoke all on function public.set_contact_filters(uuid, uuid, uuid[]) from public, anon;
 grant execute on function public.set_contact_filters(uuid, uuid, uuid[]) to authenticated;
+
+-- ---------------------------------------------------------------------
+-- Site map (2.2.0): the layered floorplan on the Map tab.
+--   site_map     one row: the map itself (aerial photo, traced floorplan,
+--                areas, exit routes, exit rules), loaded by an admin with
+--                Map → Load the site map. It is NOT in this repo:
+--                the repo is public and the layout of the building is not.
+--   map_areas    each room / hallway on the map: its name, which team's
+--                zone it is in, "not our space", and merges (several areas
+--                that are really one space). Admins change these on the map.
+--   map_markers  equipment and utility markers admins place on the map
+--                (fire extinguishers, AEDs, shut-offs…).
+--   map_views    saved views of the map, shown in SOPs.
+-- Members (approved accounts) can read all three; only admins change them.
+-- ---------------------------------------------------------------------
+create table if not exists public.site_map (
+  id          int primary key default 1 check (id = 1),
+  version     int not null default 0,
+  data        jsonb,
+  updated_at  timestamptz not null default now(),
+  updated_by  uuid references public.profiles(id) on delete set null
+);
+insert into public.site_map (id) values (1) on conflict (id) do nothing;
+alter table public.site_map enable row level security;
+drop policy if exists site_map_select on public.site_map;
+create policy site_map_select on public.site_map for select to authenticated using (public.is_member());
+revoke all on public.site_map from anon, authenticated;
+grant select on public.site_map to authenticated;
+-- No direct writes: admins use import_site_map.
+
+create table if not exists public.map_areas (
+  id          text primary key,
+  name        text not null default '',
+  team_id     uuid references public.teams(id) on delete set null,
+  not_ours    boolean not null default false,
+  group_id    text,
+  updated_at  timestamptz not null default now(),
+  updated_by  uuid references public.profiles(id) on delete set null
+);
+alter table public.map_areas enable row level security;
+drop policy if exists map_areas_select on public.map_areas;
+drop policy if exists map_areas_update on public.map_areas;
+create policy map_areas_select on public.map_areas for select to authenticated using (public.is_member());
+create policy map_areas_update on public.map_areas for update to authenticated using (public.is_admin()) with check (public.is_admin());
+revoke all on public.map_areas from anon, authenticated;
+grant select, update on public.map_areas to authenticated;
+-- Areas are added and removed only by import_site_map.
+
+create or replace function public.map_areas_touch() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  new.updated_at := now();
+  new.updated_by := auth.uid();
+  new.name := left(trim(coalesce(new.name, '')), 60);
+  if new.group_id = new.id then new.group_id := null; end if;
+  return new;
+end $$;
+drop trigger if exists map_areas_touch on public.map_areas;
+create trigger map_areas_touch before update on public.map_areas
+  for each row execute function public.map_areas_touch();
+
+create table if not exists public.map_markers (
+  id          uuid primary key default gen_random_uuid(),
+  layer       text not null check (layer in ('exits','equip','util')),
+  kind        text not null check (kind ~ '^[a-z]{2,12}$'),
+  label       text not null default '' check (char_length(label) <= 80),
+  x           real not null,
+  y           real not null,
+  created_at  timestamptz not null default now(),
+  created_by  uuid references public.profiles(id) on delete set null default auth.uid()
+);
+alter table public.map_markers enable row level security;
+drop policy if exists map_markers_select on public.map_markers;
+drop policy if exists map_markers_insert on public.map_markers;
+drop policy if exists map_markers_update on public.map_markers;
+drop policy if exists map_markers_delete on public.map_markers;
+create policy map_markers_select on public.map_markers for select to authenticated using (public.is_member());
+create policy map_markers_insert on public.map_markers for insert to authenticated with check (public.is_admin());
+create policy map_markers_update on public.map_markers for update to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy map_markers_delete on public.map_markers for delete to authenticated using (public.is_admin());
+revoke all on public.map_markers from anon, authenticated;
+grant select, insert, update, delete on public.map_markers to authenticated;
+
+-- Saved views: a named set-up of the map (zoom, layers, whose exit routes,
+-- which markers) admins save on the Map tab and SOPs show
+-- (<div data-mapview="<id>"> in the SOP).
+create table if not exists public.map_views (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null check (char_length(name) between 1 and 80),
+  settings    jsonb not null default '{}'::jsonb,
+  sort_order  int  not null default 0,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+alter table public.map_views enable row level security;
+drop policy if exists map_views_select on public.map_views;
+drop policy if exists map_views_insert on public.map_views;
+drop policy if exists map_views_update on public.map_views;
+drop policy if exists map_views_delete on public.map_views;
+create policy map_views_select on public.map_views for select to authenticated using (public.is_member());
+create policy map_views_insert on public.map_views for insert to authenticated with check (public.is_admin());
+create policy map_views_update on public.map_views for update to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy map_views_delete on public.map_views for delete to authenticated using (public.is_admin());
+revoke all on public.map_views from anon, authenticated;
+grant select, insert, update, delete on public.map_views to authenticated;
+
+-- Load (or replace) the map file. Areas already on the map keep the names,
+-- teams and merges admins gave them, unless p_reset_areas is true; areas the
+-- new file no longer has are removed. Teams in the file are matched by name.
+create or replace function public.import_site_map(p jsonb, p_reset_areas boolean default false) returns int
+language plpgsql security definer set search_path = public as $$
+declare v int; ids text[];
+begin
+  if not public.is_admin() then raise exception 'Only admins can import the site map'; end if;
+  if p is null or p->>'format' is distinct from 'koinos-site-map' or jsonb_typeof(p->'areas') <> 'array' then
+    raise exception 'That file is not a Koinos site map.';
+  end if;
+  select array_agg(a->>'id') into ids from jsonb_array_elements(p->'areas') a;
+  update public.site_map set data = p, version = version + 1, updated_at = now(), updated_by = auth.uid()
+   where id = 1 returning version into v;
+  delete from public.map_areas where not (id = any(ids));
+  insert into public.map_areas (id, name, team_id, not_ours, group_id)
+  select a->>'id', left(coalesce(a->>'name', ''), 60),
+         (select t.id from public.teams t where lower(t.name) = lower(a->>'team') limit 1),
+         coalesce(a->>'team', '') = 'out', nullif(a->>'group', '')
+    from jsonb_array_elements(p->'areas') a
+  on conflict (id) do update set
+    name = case when p_reset_areas then excluded.name else map_areas.name end,
+    team_id = case when p_reset_areas then excluded.team_id else map_areas.team_id end,
+    not_ours = case when p_reset_areas then excluded.not_ours else map_areas.not_ours end,
+    group_id = case when p_reset_areas then excluded.group_id else map_areas.group_id end;
+  return v;
+end $$;
+revoke all on function public.import_site_map(jsonb, boolean) from public, anon;
+grant execute on function public.import_site_map(jsonb, boolean) to authenticated;
+
+-- Map colors: exit routes are red, so on first run the four teams move off
+-- red to the colors used on the map (Alpha purple, Bravo green, Charlie
+-- blue, Delta yellow). Only if all four still have their original colors;
+-- either way they can be changed under Manage teams.
+do $$ begin
+  if (select count(*) from public.teams where (name, color) in (('Alpha','red'),('Bravo','blue'),('Charlie','green'),('Delta','purple'))) = 4 then
+    update public.teams set color = case name when 'Alpha' then 'purple' when 'Bravo' then 'green' when 'Charlie' then 'blue' when 'Delta' then 'yellow' end
+     where name in ('Alpha','Bravo','Charlie','Delta');
+  end if;
+end $$;

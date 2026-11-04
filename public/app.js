@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [], app_settings: [], background_checks: [], contact_filters: [], contact_filter_members: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [], app_settings: [], background_checks: [], contact_filters: [], contact_filter_members: [], map_areas: [], map_markers: [], map_views: [] });
   const state = {
     session: null,
     profile: null,
@@ -83,6 +83,7 @@
     mail: ['M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z', 'M22 6l-10 7L2 6'],
     shield: ['M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'],
     calendar: ['M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z', 'M16 2v4', 'M8 2v4', 'M3 10h18'],
+    globe: ['M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20z', 'M2 12h20', 'M12 2a15.3 15.3 0 0 1 4 10a15.3 15.3 0 0 1-4 10a15.3 15.3 0 0 1-4-10a15.3 15.3 0 0 1 4-10z'],
     clipboard: ['M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2', 'M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z', 'M9 12h6', 'M9 16h4']
   };
   function icon(name) {
@@ -271,6 +272,7 @@
   // are shown from this device's saved copy (see SOP pictures below).
   const SOP_HREF = /^#\/sops\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
   const SOP_PHOTO = /^sops\/[A-Za-z0-9-]{1,64}\.(jpg|png|webp)$/;
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const SAFE_TAGS = new Set(['P', 'BR', 'H2', 'H3', 'H4', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'MARK', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'HR', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'A']);
   const DROP_TAGS = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'TEMPLATE', 'SVG', 'MATH', 'NOSCRIPT', 'FORM', 'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'IMG', 'VIDEO', 'AUDIO', 'LINK', 'META', 'COLGROUP', 'COL']);
   function safeHtml(html, cls, opts) {
@@ -283,6 +285,11 @@
         if (n.nodeType === 1 && n.tagName === 'IMG') {
           const path = n.getAttribute('data-photo') || '';
           if (media && SOP_PHOTO.test(path)) to.append(sopFigure(path, n.getAttribute('alt') || ''));
+          continue;
+        }
+        if (n.nodeType === 1 && n.tagName === 'DIV' && n.hasAttribute('data-mapview')) {
+          const vid = (n.getAttribute('data-mapview') || '').toLowerCase();
+          if (media && UUID_RE.test(vid)) { const f = sopMapFigure(vid); if (f) to.append(f); }
           continue;
         }
         if (n.nodeType !== 1 || DROP_TAGS.has(n.tagName)) continue;
@@ -490,10 +497,13 @@
     app_settings: (t) => t.select('*'),
     background_checks: (t) => t.select('*'),   // only admins and Office Admins get rows
     contact_filters: (t) => t.select('*').order('sort_order'),   // "Admins only" filters come back to admins only
-    contact_filter_members: (t) => t.select('*')
+    contact_filter_members: (t) => t.select('*'),
+    map_areas: (t) => t.select('*'),
+    map_markers: (t) => t.select('*').order('created_at'),
+    map_views: (t) => t.select('*').order('sort_order').order('name')
   };
   const attSince = () => isoDay(new Date(Date.now() - 200 * 864e5));
-  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'app_settings', 'background_checks', 'contact_filters', 'contact_filter_members', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
+  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'app_settings', 'background_checks', 'contact_filters', 'contact_filter_members', 'map_areas', 'map_markers', 'map_views', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
 
   function loadCachedData() {
     if (cacheGet('myBgOk') === false) state.myBgOk = false;
@@ -1330,6 +1340,7 @@
     state.photoUrls = {};
     state.sopTrail = [];
     forgetSopImages();
+    forgetSiteMap();
     try { if (window.caches) caches.delete(PHOTO_CACHE); } catch { /* ignore */ }
     history.replaceState(null, '', '/');
     render();
@@ -1340,8 +1351,9 @@
   // ------------------------------------------------------------------
   const TABS = [
     ['alerts', 'Alerts', 'bell'],
-    ['schedule', 'Schedule', 'calendar'],
+    ['schedule', 'Sched', 'calendar'],
     ['sops', 'SOPs', 'book'],
+    ['map', 'Map', 'globe'],
     ['board', 'Board', 'msg'],
     ['contacts', 'Contacts', 'phone'],
     ['attendance', 'Count', 'clipboard'],
@@ -1383,13 +1395,13 @@
     if ((tab === 'users' || tab === 'assignments') && !isAdmin()) tab = 'more';
     if (tab === 'attendance-setup' && !isAdmin()) tab = 'attendance';
     if (tab === 'background' && !(isAdmin() || isOfficeAdmin())) tab = 'more';
-    if (tab !== 'contacts' && state.returnTo && !(tab === 'sops' && '#/sops/' + id === state.returnTo.hash)) state.returnTo = null;
+    if (tab !== 'contacts' && tab !== 'map' && state.returnTo && !(tab === 'sops' && '#/sops/' + id === state.returnTo.hash)) state.returnTo = null;
     if (tab === 'teams' && (!isAdmin() || !teamsEnabled())) tab = 'contacts';
     if (tab === 'team') {   // the old Team tab: now Contacts → Security Team
       tab = 'contacts'; state.contactQuery = '';
       history.replaceState(null, '', '#/contacts');
     }
-    const views = { alerts: alertsView, schedule: scheduleView, confirm: confirmView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView, teams: teamsAdminView, activation: activationView, background: backgroundView };
+    const views = { alerts: alertsView, schedule: scheduleView, confirm: confirmView, board: boardView, attendance: attendanceView, sops: sopsView, contacts: contactsView, more: moreView, users: usersView, assignments: assignmentsView, 'attendance-setup': attendanceSetupView, teams: teamsAdminView, activation: activationView, background: backgroundView, map: mapView };
     const v = (views[tab] || alertsView)(id, sub);
     const activeTab = (tab === 'users' || tab === 'background') ? 'more' : (tab === 'assignments' || tab === 'confirm') ? 'schedule' : tab === 'attendance-setup' ? 'attendance' : tab === 'teams' ? 'contacts' : tab === 'activation' ? 'alerts' : (views[tab] ? tab : 'alerts');
 
@@ -1708,9 +1720,10 @@
     if (trail.length && !from) trail.length = 0;
     const body = sopBody(s.body, s.format, 'sop-body');
     body.addEventListener('click', (e) => {
-      const a = e.target.closest && e.target.closest('a.sop-link');
+      const a = e.target.closest && e.target.closest('a.sop-link, a.rt-map');
       if (!a) return;
-      if (a.classList.contains('contact-link')) state.returnTo = { hash: '#/sops/' + s.id, title: s.title, scroll: window.scrollY };
+      if (a.classList.contains('rt-map')) mapState().routeId = undefined;   // open the view fresh each time
+      if (a.classList.contains('contact-link') || a.classList.contains('rt-map')) state.returnTo = { hash: '#/sops/' + s.id, title: s.title, scroll: window.scrollY };
       else state.sopTrail.push(s.id);
     });
     // Other SOPs that link here.
@@ -1809,7 +1822,9 @@
             uploadImage: async (file) => { const p = await uploadSopImage(file); uploaded.push(p); return p; },
             imageUrl: (p) => sopImageUrl(p),
             pickSop: (o) => pickSopDialog(o, s.id),
-            pickFilter: (o) => pickFilterDialog(o)
+            pickFilter: (o) => pickFilterDialog(o),
+            pickMapView: () => pickMapViewDialog(),
+            mapViewLabel: (vid) => (mapViewById(String(vid || '').toLowerCase()) || {}).name || ''
           });
           return {
             get: () => (ed.isEmpty() ? '' : ed.getHTML()),
@@ -4739,6 +4754,664 @@
         await afterSave('app_settings', 'Settings saved');
       }
     });
+  }
+
+  // ------------------------------------------------------------------
+  // Site map (the Map tab): the aerial photo and the traced floorplan in
+  // layers (parking, areas we can't use, team zones, exit routes, exits,
+  // equipment, utilities). The map itself (one file, ~600 KB) is loaded by an
+  // admin with "Import map file" and kept in the database, never in this
+  // public repo; each phone downloads it once and keeps a copy for offline.
+  // Admins rename areas, set their team, mark "not our space", merge areas
+  // that are really one space, and place equipment/utility markers.
+  //   #/map
+  // ------------------------------------------------------------------
+  const MAP_CACHE = 'koinos-map';
+  const MAP_KEY = '/__site-map';
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const TEAM_HEX = { red: '#e03131', orange: '#f08c00', yellow: '#f2b705', green: '#2f9e44', teal: '#0c8599', blue: '#1c7ed6', purple: '#9c36b5', pink: '#d6336c', gray: '#868e96' };
+  const EXIT_RED = '#e03131';
+  const MARKER_TYPES = {
+    exits: [['exit', 'EX', 'Exit door'], ['rally', 'RP', 'Rally point'], ['gather', 'GP', 'Gathering point']],
+    equip: [['ext', 'FE', 'Fire extinguisher'], ['aed', 'AED', 'AED'], ['firstaid', '+', 'First aid kit'], ['bleed', 'SB', 'Stop the Bleed kit'], ['pull', 'FA', 'Fire alarm pull station']],
+    util: [['elec', 'EP', 'Electrical panel'], ['gas', 'G', 'Gas shut-off'], ['water', 'W', 'Water shut-off'], ['hvac', 'H', 'HVAC unit / thermostat'], ['light', 'L', 'Light switches']]
+  };
+  const MARKER_COLOR = { exits: EXIT_RED, equip: '#c92a2a', util: '#0c8599' };
+  const MAP_LAYERS = [
+    ['aerial', 'Aerial photo'], ['parking', 'Parking'], ['plan', 'Floorplan'], ['unavail', "Areas we can't use"],
+    ['rooms', 'Room names'], ['zones', 'Team zones'], ['streets', 'Street names'],
+    ['paths', 'Exit routes'], ['altpaths', 'Alternate exit routes'], ['exits', 'Exits & Gathering'],
+    ['equip', 'Emergency Equipment'], ['util', 'HVAC / Lights / Plumbing']
+  ];
+  const mapState = () => state.map || (state.map = {
+    data: null, version: 0, checked: false, loading: false, error: '', vb: null,
+    layers: Object.assign(Object.fromEntries(MAP_LAYERS.map(([k]) => [k, k !== 'altpaths'])), cacheGet('mapLayers') || {}),
+    sel: null, selMarker: null, mode: null, addKind: 'ext', addLabel: '', pathTeam: '',
+    kinds: null,        // marker kinds to show (null = all), set by a saved view
+    activeView: null,   // the saved view last opened
+    routeId: undefined, pendingFit: null
+  });
+  // Everything that decides what a drawing of the map shows.
+  const viewOpts = () => { const m = mapState(); return { layers: m.layers, pathTeam: m.pathTeam, sel: m.sel, selMarker: m.selMarker, mode: m.mode, vb: m.vb, kinds: m.kinds }; };
+  const mapViewById = (id) => id && state.data.map_views.find((v) => v.id === id);
+
+  async function readMapCache() {
+    const c = await openCache(MAP_CACHE);
+    if (!c) return null;
+    try { const r = await c.match(MAP_KEY); return r ? await r.json() : null; } catch { return null; }
+  }
+  async function writeMapCache(v) {
+    const c = await openCache(MAP_CACHE);
+    if (c) try { await c.put(MAP_KEY, new Response(JSON.stringify(v), { headers: { 'Content-Type': 'application/json' } })); } catch { /* storage full */ }
+  }
+  // Load the saved copy, then download the map only if the server has a newer one.
+  async function ensureSiteMap(force) {
+    const m = mapState();
+    if (m.loading || (m.checked && !force)) return;
+    m.loading = true;
+    try {
+      if (!m.data) { const saved = await readMapCache(); if (saved && saved.data) { m.data = saved.data; m.version = saved.version; render(); } }
+      const { data: row, error } = await sb.from('site_map').select('version').eq('id', 1).maybeSingle();
+      if (error) { m.error = /does not exist|schema cache|could not find/i.test(error.message || '') ? 'missing' : ''; return; }
+      m.error = '';
+      m.checked = true;
+      const v = (row && row.version) || 0;
+      if (!v) { m.data = null; m.version = 0; return; }
+      if (v !== m.version || !m.data) {
+        const { data: full, error: e2 } = await sb.from('site_map').select('version,data').eq('id', 1).single();
+        if (e2) throw e2;
+        m.data = full.data; m.version = full.version; m.vb = null;
+        await writeMapCache({ version: full.version, data: full.data });
+      }
+    } catch { /* offline: keep the saved copy */ } finally {
+      m.loading = false;
+      if (['map', 'sops'].includes(route()[0])) render();
+    }
+  }
+  async function forgetSiteMap() {
+    state.map = null;
+    try { if (window.caches) await caches.delete(MAP_CACHE); } catch { /* ignore */ }
+  }
+
+  // Areas: the map file's rooms, with the names/teams/merges admins set (map_areas).
+  const areaRow = (id) => state.data.map_areas.find((r) => r.id === id) || null;
+  function mapAreas() {
+    const m = mapState();
+    return ((m.data && m.data.areas) || []).map((a) => {
+      const r = areaRow(a.id);
+      return Object.assign({}, a, r ? { name: r.name || a.name, team_id: r.team_id, out: r.not_ours, group: r.group_id || null } : { team_id: null, out: a.team === 'out', group: a.group || null });
+    });
+  }
+  const gidOf = (a) => a.group || a.id;
+  const showZones = () => teamsEnabled() || isAdmin();   // Teams off: members don't see team zones
+  const teamHex = (t) => (t && TEAM_HEX[t.color]) || TEAM_HEX.gray;
+  const isGenericName = (n) => /^Room \d+$/.test(n || '');
+
+  // Exit routes. The file has every area's route to every exit; the rules pick
+  // which ones show: by team (matched by name), with per-area exceptions.
+  function areaPaths(prim, areas) {
+    const P = (mapState().data.paths) || {};
+    const ids = areas.filter((x) => gidOf(x) === prim.id).map((x) => x.id);
+    const ex = {};
+    ids.forEach((id) => { const p = P[id]; if (!p) return; for (const k in p.ex) if (!ex[k] || p.ex[k].c < ex[k].c) ex[k] = p.ex[k]; });
+    const b = P[prim.id] || P[ids.find((id) => P[id])];
+    return b ? { south: b.south, cnorth: b.cnorth, ex } : null;
+  }
+  function routesFor(a, areas) {
+    if (a.out) return null;
+    const rules = mapState().data.rules || {};
+    const P = areaPaths(a, areas); if (!P) return null;
+    const by = (ids) => ids.filter((k) => P.ex[k]).sort((x, y) => P.ex[x].c - P.ex[y].c);
+    const t = teamById(a.team_id);
+    let rule = t && (rules.teams || {})[t.name.toLowerCase()];
+    if (rule && rule.north && P.cnorth) rule = rule.north;
+    const own = (rules.areas || {})[a.id];
+    if (own) rule = own;
+    if (!rule) { const all = by(Object.keys(P.ex)); return { prims: all.slice(0, 1), alts: all.slice(1, 2), P }; }
+    const prims = rule.pAll ? rule.pAll.filter((k) => P.ex[k]) : by(rule.p || []).slice(0, 1);
+    const alts = [];
+    ((P.south && !own) ? (rules.southAlt || []) : (rule.a || [])).forEach((x) => {
+      const k = Array.isArray(x) ? by(x.filter((y) => !prims.includes(y)))[0] : x;
+      if (k && !prims.includes(k) && P.ex[k] && !alts.includes(k)) alts.push(k);
+    });
+    return { prims, alts, P };
+  }
+  const exitName = (k) => ((mapState().data.rules || {}).exitNames || {})[k] || ('Exit ' + k);
+
+  function sv(tag, attrs, parent) {
+    const n = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs || {})) if (v != null) n.setAttribute(k, String(v));
+    if (parent) parent.append(n);
+    return n;
+  }
+  const pts = (a) => a.map((p) => p[0] + ',' + p[1]).join(' ');
+
+  function drawMapPaths(gP, gA, areas, o) {
+    const m = mapState();
+    const keep = (m.data.rules || {}).keepOwnLine || [];
+    const list = [];
+    areas.filter((a) => !a.group).forEach((a) => {
+      if (o.pathTeam && a.team_id !== o.pathTeam) return;
+      const R = routesFor(a, areas);
+      if (R && R.prims.length) list.push([a, R]);
+    });
+    // A space another route to the same exit already runs through gets no extra line of its own.
+    const thruP = {}, thruA = {};
+    const mark = (mm, ids, k) => (ids || []).forEach((id) => { (mm[id] = mm[id] || new Set()).add(k); });
+    list.forEach(([, R]) => { R.prims.forEach((k) => mark(thruP, R.P.ex[k].thru, k)); R.alts.forEach((k) => mark(thruA, R.P.ex[k].thru, k)); });
+    const covered = (mm, id, k) => !!(mm[id] && mm[id].has(k) && !keep.includes(id));
+    const links = sv('g', { opacity: 0.9 }, gP), trunks = sv('g', { opacity: 0.9 }, gP);
+    const altCase = sv('g', { opacity: 0.8 }, gA), altCore = sv('g', {}, gA);
+    const line = (g, p, w, extra) => sv('polyline', Object.assign({ points: pts(p), fill: 'none', stroke: EXIT_RED, 'stroke-width': w, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, extra || {}), g);
+    list.forEach(([a, R]) => {
+      const on = o.sel === a.id;
+      R.alts.forEach((k) => {
+        const e = R.P.ex[k];
+        const p = (covered(thruA, a.id, k) || covered(thruP, a.id, k)) ? e.trunk : e.link.concat(e.trunk);
+        if (p.length < 2) return;
+        line(altCase, p, on ? 3.2 : 2.3, { 'marker-end': 'url(#map-arrow-alt)' });
+        line(altCore, p, on ? 1.6 : 1, { stroke: '#ffffff' });
+      });
+      R.prims.forEach((k) => {
+        const e = R.P.ex[k];
+        if (e.trunk.length > 1) line(trunks, e.trunk, on ? 3.4 : 2.4, { 'marker-end': 'url(#map-arrow)' });
+        if (!covered(thruP, a.id, k) && e.link.length > 1) line(links, e.link, on ? 1.8 : 0.9);
+      });
+    });
+  }
+
+  function markerShape(layer, g, r) {
+    const c = MARKER_COLOR[layer];
+    if (layer === 'exits') return sv('circle', { class: 'm-shape', r, fill: c, stroke: '#fff', 'stroke-width': r * 0.18 }, g);
+    if (layer === 'equip') return sv('rect', { class: 'm-shape', x: -r, y: -r, width: 2 * r, height: 2 * r, rx: r * 0.3, fill: c, stroke: '#fff', 'stroke-width': r * 0.18 }, g);
+    return sv('polygon', { class: 'm-shape', points: `0,${-r * 1.25} ${r * 1.25},0 0,${r * 1.25} ${-r * 1.25},0`, fill: c, stroke: '#fff', 'stroke-width': r * 0.18 }, g);
+  }
+  const markerInfo = (kind) => { for (const L in MARKER_TYPES) for (const t of MARKER_TYPES[L]) if (t[0] === kind) return { layer: L, code: t[1], name: t[2] }; return null; };
+  function drawMarkers(svg, fixedR, o) {
+    o = o || viewOpts();
+    const ctm = fixedR ? null : svg.getScreenCTM();
+    const r = fixedR || 9 / ((ctm && ctm.a) || 1);
+    for (const L of ['exits', 'equip', 'util']) {
+      const g = svg.querySelector('#ml-' + L + '-markers');
+      if (!g) continue;
+      g.replaceChildren();
+      state.data.map_markers.filter((mk) => mk.layer === L && (!o.kinds || o.kinds.includes(mk.kind))).forEach((mk) => {
+        const ti = markerInfo(mk.kind); if (!ti) return;
+        const mg = sv('g', { class: 'm-mk' + (o.selMarker === mk.id ? ' on' : ''), 'data-marker': mk.id, transform: `translate(${mk.x} ${mk.y})` }, g);
+        sv('title', {}, mg).textContent = ti.name + (mk.label ? ': ' + mk.label : '');
+        markerShape(L, mg, r);
+        sv('text', { 'font-size': ti.code.length > 2 ? r * 0.78 : r * 1.05 }, mg).textContent = ti.code;
+      });
+    }
+  }
+
+  function buildMapSvg(o) {
+    const m = mapState(), D = m.data, areas = mapAreas();
+    o = o || viewOpts();
+    const svg = sv('svg', { class: 'site-map' + (o.mode ? ' adding' : ''), role: 'img', 'aria-label': 'Site map' });
+    const defs = sv('defs', {}, svg);
+    const arrow = (id, size, ref) => { const mk = sv('marker', { id, viewBox: '0 0 10 10', refX: ref, refY: 5, markerWidth: size, markerHeight: size, orient: 'auto' }, defs); sv('path', { d: 'M0 0L10 5L0 10z', fill: EXIT_RED }, mk); };
+    arrow('map-arrow', 3.2, 6); arrow('map-arrow-alt', 3, 5); arrow('map-arrow-out', 4, 7);
+    const pat = sv('pattern', { id: 'map-hatch', width: 6, height: 6, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, defs);
+    sv('rect', { width: 6, height: 6, fill: '#9aa4ae', 'fill-opacity': 0.55 }, pat);
+    sv('line', { x1: 0, y1: 0, x2: 0, y2: 6, stroke: '#59636d', 'stroke-width': 1.2 }, pat);
+    const layer = (id) => { const g = sv('g', { id: 'ml-' + id }, svg); if (!o.layers[id]) g.setAttribute('display', 'none'); return g; };
+
+    sv('image', { href: D.aerial, x: 0, y: 0, width: D.frame.w, height: D.frame.h }, layer('aerial'));
+    const gPark = layer('parking');
+    (D.lots || []).forEach((l) => {
+      const c = l.kind === 'reserved' ? '#f08c00' : '#2f9e44';
+      sv('polygon', { points: pts(l.pts), fill: c, 'fill-opacity': 0.32, stroke: c, 'stroke-width': 3, 'stroke-linejoin': 'round' }, gPark);
+      const cx = l.pts.reduce((s, p) => s + p[0], 0) / l.pts.length, cy = l.pts.reduce((s, p) => s + p[1], 0) / l.pts.length;
+      const t = sv('text', { class: 'm-lot', x: cx, y: cy }, gPark);
+      t.textContent = l.kind === 'reserved' ? 'RESERVED PARKING' : 'PARKING';
+      if (l.sub) { const s = sv('tspan', { class: 'm-lotsub', x: cx, dy: 16 }, t); s.textContent = l.sub; }
+    });
+    const gBg = sv('g', {}, svg); if (!o.layers.plan) gBg.setAttribute('display', 'none');
+    sv('polygon', { points: pts(D.outline), class: 'm-planbg' }, gBg);
+    // Areas are always tappable; the Team zones layer only decides whether they're colored.
+    const gZ = sv('g', { id: 'ml-zones' }, svg);
+    const zonesOn = o.layers.zones && showZones();
+    areas.forEach((a) => {
+      const prim = areas.find((x) => x.id === gidOf(a)) || a;
+      const t = zonesOn ? teamById(prim.team_id) : null;
+      const on = o.sel === gidOf(a);
+      const fill = prim.out ? 'url(#map-hatch)' : t ? teamHex(t) : '#ffffff';
+      sv('polygon', { points: pts(a.poly), 'data-area': a.id, class: 'm-area', fill, 'fill-opacity': prim.out ? 1 : t ? 0.36 : on ? 0.5 : 0.01, stroke: on ? '#111' : 'none', 'stroke-width': on ? 1.6 : 0, 'stroke-linejoin': 'round' }, gZ);
+    });
+    const plan = sv('g', { id: 'ml-plan' }, svg); if (!o.layers.plan) plan.setAttribute('display', 'none');
+    sv('path', { d: D.plan.d, fill: '#1b232c', 'fill-rule': 'evenodd', transform: `translate(${D.plan.t.tx} ${D.plan.t.ty}) scale(${D.plan.t.sx} ${D.plan.t.sy})` }, plan);
+    const gU = layer('unavail');
+    (D.unavail || []).forEach((p) => sv('polygon', { points: pts(p), fill: 'url(#map-hatch)' }, gU));
+    const gA = layer('altpaths'), gP = layer('paths');
+    drawMapPaths(gP, gA, areas, o);
+    const gR = layer('rooms');
+    const labelSize = (a) => Math.max(3.6, Math.min(8.3, 3.4 + Math.sqrt(a.a) * 0.013));
+    areas.filter((a) => !a.group && !a.out && a.name && !isGenericName(a.name)).forEach((a) => {
+      sv('text', { class: 'm-room', x: a.lx, y: a.ly, 'font-size': labelSize(a).toFixed(2) }, gR).textContent = a.name;
+    });
+    if (zonesOn) teamsSorted().forEach((t) => {
+      const rs = areas.filter((a) => !a.group && !a.out && a.team_id === t.id);
+      if (!rs.length) return;
+      const big = rs.reduce((x, y) => (y.a > x.a ? y : x));
+      const dy = isGenericName(big.name) ? 0 : labelSize(big) * 1.15;
+      sv('text', { class: 'm-zone', x: big.lx, y: big.ly + dy, fill: teamHex(t) }, gZ).textContent = t.name.toUpperCase();
+    });
+    const gS = layer('streets');
+    (D.streets || []).forEach((s) => { sv('text', { class: 'm-street', x: s.x, y: s.y }, gS).textContent = s.text; });
+    const gE = layer('exits');
+    (D.routes || []).forEach((r) => sv('polyline', { points: pts(r), fill: 'none', stroke: EXIT_RED, 'stroke-width': 3, 'stroke-dasharray': '9 6', 'stroke-linecap': 'round', 'marker-end': 'url(#map-arrow-out)' }, gE));
+    const G = D.gather;
+    if (G) {
+      sv('circle', { cx: G.x, cy: G.y, r: G.r, fill: EXIT_RED, 'fill-opacity': 0.28, stroke: EXIT_RED, 'stroke-width': 3.5 }, gE);
+      sv('text', { class: 'm-lot', x: G.x, y: G.y - 4 }, gE).textContent = 'EMERGENCY';
+      sv('text', { class: 'm-lot', x: G.x, y: G.y + 16 }, gE).textContent = 'GATHERING LOCATION';
+    }
+    (D.doors || []).forEach((d) => {
+      const g = sv('g', { transform: `translate(${d.x} ${d.y})` }, gE);
+      sv('title', {}, g).textContent = d.note;
+      sv('circle', { r: 7.5, fill: '#fff', stroke: EXIT_RED, 'stroke-width': 2.2 }, g);
+      sv('text', { class: 'm-door' }, g).textContent = d.n;
+    });
+    if (D.lincoln) {
+      const g = sv('g', { transform: `translate(${D.lincoln[0]} ${D.lincoln[1] - 34})` }, gE);
+      sv('rect', { x: -38, y: -13, width: 76, height: 26, rx: 4, fill: '#fff', stroke: EXIT_RED, 'stroke-width': 2 }, g);
+      sv('text', { class: 'm-exitnote', y: -3 }, g).textContent = 'EMERGENCY EXIT ONLY';
+      sv('text', { class: 'm-exitnote sub', y: 7 }, g).textContent = 'through neighboring business';
+    }
+    sv('g', { id: 'ml-exits-markers' }, gE);
+    sv('g', { id: 'ml-equip-markers' }, layer('equip'));
+    sv('g', { id: 'ml-util-markers' }, layer('util'));
+    return svg;
+  }
+
+  // Pan (drag), zoom (pinch, wheel, + / −) and taps. Moving the map changes the
+  // view box in place; only taps that change what's selected re-render.
+  function mapViewBox(svg, vb) {
+    const m = mapState();
+    m.vb = vb;
+    svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+    // Room names only when they'd be big enough to read (about 1 screen pixel per map unit).
+    const r = svg.getBoundingClientRect();
+    svg.classList.toggle('far', r.width ? Math.min(r.width / vb.w, r.height / vb.h) < 0.95 : vb.w > 650);
+    drawMarkers(svg);
+  }
+  function fitMap(svg, rect) {
+    const pad = Math.max(rect.w, rect.h) * 0.04;
+    const vb = { x: rect.x - pad, y: rect.y - pad, w: rect.w + 2 * pad, h: rect.h + 2 * pad };
+    const r = svg.getBoundingClientRect();
+    if (r.width && r.height) {
+      const ar = r.width / r.height;
+      if (vb.w / vb.h < ar) { const nw = vb.h * ar; vb.x -= (nw - vb.w) / 2; vb.w = nw; } else { const nh = vb.w / ar; vb.y -= (nh - vb.h) / 2; vb.h = nh; }
+    }
+    mapViewBox(svg, vb);
+  }
+  function toMapPoint(svg, cx, cy) { const p = svg.createSVGPoint(); p.x = cx; p.y = cy; return p.matrixTransform(svg.getScreenCTM().inverse()); }
+  function zoomMap(svg, f, cx, cy) {
+    const vb = Object.assign({}, mapState().vb);
+    const nw = Math.min(1600, Math.max(50, vb.w * f)); f = nw / vb.w;
+    const p = toMapPoint(svg, cx, cy);
+    mapViewBox(svg, { x: p.x - (p.x - vb.x) * f, y: p.y - (p.y - vb.y) * f, w: vb.w * f, h: vb.h * f });
+  }
+  function mapGestures(svg, onTap) {
+    const ptrs = new Map(); let moved = 0, pinch0 = null;
+    svg.addEventListener('wheel', (e) => { e.preventDefault(); zoomMap(svg, Math.exp(e.deltaY * 0.0015), e.clientX, e.clientY); }, { passive: false });
+    svg.addEventListener('pointerdown', (e) => {
+      svg.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY }); moved = 0;
+      if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; pinch0 = Math.hypot(a.x - b.x, a.y - b.y); }
+      svg.classList.add('dragging');
+    });
+    svg.addEventListener('pointermove', (e) => {
+      if (!ptrs.has(e.pointerId)) return;
+      const prev = ptrs.get(e.pointerId), cur = { x: e.clientX, y: e.clientY };
+      ptrs.set(e.pointerId, cur);
+      if (ptrs.size === 1) {
+        const k = svg.getScreenCTM().a, dx = cur.x - prev.x, dy = cur.y - prev.y;
+        moved += Math.abs(dx) + Math.abs(dy);
+        const vb = mapState().vb;
+        mapViewBox(svg, { x: vb.x - dx / k, y: vb.y - dy / k, w: vb.w, h: vb.h });
+      } else if (ptrs.size === 2) {
+        const [a, b] = [...ptrs.values()], d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (pinch0) zoomMap(svg, pinch0 / d, (a.x + b.x) / 2, (a.y + b.y) / 2);
+        pinch0 = d; moved += 10;
+      }
+    });
+    const up = (e) => {
+      const tap = ptrs.size === 1 && moved < 6 && e.type === 'pointerup';
+      ptrs.delete(e.pointerId); if (ptrs.size < 2) pinch0 = null;
+      svg.classList.remove('dragging');
+      if (tap) onTap(e);
+    };
+    svg.addEventListener('pointerup', up);
+    svg.addEventListener('pointercancel', up);
+  }
+
+  async function saveAreas(ids, patch) {
+    const { error } = await sb.from('map_areas').update(patch).in('id', ids);
+    if (error) { toast(friendlyError(error)); return false; }
+    await refreshTable('map_areas');
+    render();
+    return true;
+  }
+  async function mapTap(svg, e) {
+    const m = mapState();
+    const t = document.elementFromPoint(e.clientX, e.clientY);
+    const mk = t && t.closest ? t.closest('[data-marker]') : null;
+    const ar = t && t.closest ? t.closest('[data-area]') : null;
+    if (m.mode === 'add') {
+      const p = toMapPoint(svg, e.clientX, e.clientY);
+      const ti = markerInfo(m.addKind);
+      m.mode = null;
+      const { data, error } = await sb.from('map_markers').insert({ layer: ti.layer, kind: m.addKind, label: m.addLabel.trim(), x: +p.x.toFixed(1), y: +p.y.toFixed(1) }).select().single();
+      if (error) { toast(friendlyError(error)); render(); return; }
+      m.addLabel = ''; m.layers[ti.layer] = true; cacheSet('mapLayers', m.layers);
+      await refreshTable('map_markers');
+      m.selMarker = data.id; m.sel = null;
+      toast(ti.name + ' placed');
+      render();
+      return;
+    }
+    if (m.mode === 'merge') {
+      m.mode = null;
+      const areas = mapAreas();
+      const target = ar && areas.find((a) => a.id === ar.dataset.area);
+      const prim = areas.find((a) => a.id === m.sel);
+      if (target && prim && gidOf(target) !== prim.id) {
+        const ids = areas.filter((a) => gidOf(a) === gidOf(target)).map((a) => a.id);
+        if (await saveAreas(ids, { group_id: prim.id, team_id: prim.team_id || null, not_ours: !!prim.out })) toast('Merged into ' + prim.name);
+      } else render();
+      return;
+    }
+    if (mk) { m.selMarker = mk.dataset.marker; m.sel = null; }
+    else if (ar) { const a = mapAreas().find((x) => x.id === ar.dataset.area); m.sel = a ? gidOf(a) : null; m.selMarker = null; }
+    else { m.sel = null; m.selMarker = null; }
+    render();
+  }
+
+  // Placing a marker or merging happens on the map, so bring it into view.
+  function startMapMode(mode) {
+    const m = mapState();
+    m.mode = mode;
+    if (mode === 'add') { m.sel = null; m.selMarker = null; }
+    render();
+    requestAnimationFrame(() => { const b = document.querySelector('.map-box'); if (b) b.scrollIntoView({ block: 'center', behavior: 'smooth' }); });
+  }
+  function mapAreaPanel(areas) {
+    const m = mapState();
+    const a = areas.find((x) => x.id === m.sel);
+    if (!a) return null;
+    const t = teamById(a.team_id);
+    const R = routesFor(a, areas);
+    const members = areas.filter((x) => x.group === a.id);
+    const ids = [a.id, ...members.map((x) => x.id)];
+    const exits = R && R.prims.length ? (R.prims.length > 1 ? 'Primary exits: ' : 'Primary exit: ') + R.prims.map(exitName).join(', ') + (R.alts.length ? ' · Alternates: ' + R.alts.map(exitName).join(', ') : '') : '';
+    const body = [
+      h('div', { class: 'row' },
+        h('div', { class: 'grow' }, h('strong', {}, a.name || 'Unnamed area'),
+          h('div', { class: 'muted small' }, a.out ? 'Not our space' : showZones() ? (t ? t.name + (teamsEnabled() ? '' : ' (Teams off: members don\'t see zones)') : 'No team') : '')),
+        h('button', { class: 'btn small', onclick: () => { m.sel = null; render(); } }, 'Done')),
+      exits ? h('p', { class: 'hint' }, exits) : null
+    ];
+    if (isAdmin()) {
+      body.push(h('div', { class: 'field' }, h('label', { for: 'map-area-name' }, 'Name'),
+        h('input', { type: 'text', id: 'map-area-name', value: a.name, maxlength: 60, onchange: (e) => saveAreas([a.id], { name: e.target.value.trim() }) })));
+      body.push(h('div', { class: 'small muted map-label' }, 'Team'));
+      body.push(h('div', { class: 'chips' },
+        teamsSorted().map((tm) => h('button', { class: 'chip map-team-chip tc-' + tm.color + (a.team_id === tm.id && !a.out ? ' on' : ''), onclick: () => saveAreas(ids, { team_id: tm.id, not_ours: false }) }, tm.name)),
+        h('button', { class: 'chip' + (!a.team_id && !a.out ? ' on' : ''), onclick: () => saveAreas(ids, { team_id: null, not_ours: false }) }, 'None'),
+        h('button', { class: 'chip' + (a.out ? ' on' : ''), onclick: () => saveAreas(ids, { team_id: null, not_ours: true }) }, 'Not our space')));
+      body.push(h('div', { class: 'actions' },
+        h('button', { class: 'btn small', onclick: () => startMapMode('merge') }, 'Merge with another area'),
+        members.length ? h('button', { class: 'btn small', onclick: () => saveAreas(members.map((x) => x.id), { group_id: null }) }, 'Separate merged areas') : null));
+    }
+    return h('div', { class: 'card' }, body);
+  }
+  function mapMarkerPanel() {
+    const m = mapState();
+    const mk = state.data.map_markers.find((x) => x.id === m.selMarker);
+    if (!mk) return null;
+    const ti = markerInfo(mk.kind) || { name: mk.kind };
+    return h('div', { class: 'card' },
+      h('div', { class: 'row' },
+        h('div', { class: 'grow' }, h('strong', {}, ti.name), h('div', { class: 'muted small' }, mk.label || 'No label')),
+        isAdmin() ? h('button', { class: 'btn small danger', onclick: async () => {
+          if (!confirm('Delete this ' + ti.name.toLowerCase() + ' marker?')) return;
+          const { error } = await sb.from('map_markers').delete().eq('id', mk.id);
+          if (error) { toast(friendlyError(error)); return; }
+          m.selMarker = null; await refreshTable('map_markers'); render();
+        } }, 'Delete') : null,
+        h('button', { class: 'btn small', onclick: () => { m.selMarker = null; render(); } }, 'Done')));
+  }
+  function legendIcon(layer, code) {
+    const s = sv('svg', { viewBox: '-12 -12 24 24', class: 'map-legend-ic', 'aria-hidden': 'true' });
+    markerShape(layer, s, 9);
+    sv('text', { class: 'm-legend-code', 'font-size': code.length > 2 ? 7 : 9.5 }, s).textContent = code;
+    return s;
+  }
+  function mapLayersCard() {
+    const m = mapState();
+    return h('div', { class: 'list map-layers' }, MAP_LAYERS.filter(([k]) => k !== 'zones' || showZones()).map(([k, label]) => {
+      const n = MARKER_TYPES[k] ? state.data.map_markers.filter((x) => x.layer === k).length : 0;
+      return h('div', {},
+        h('label', { class: 'list-item map-layer' },
+          h('input', { type: 'checkbox', id: 'map-layer-' + k, checked: m.layers[k] ? true : null, onchange: (e) => { m.layers[k] = e.target.checked; cacheSet('mapLayers', m.layers); render(); } }),
+          h('span', { class: 'map-sw sw-' + k }),
+          h('span', { class: 'grow' }, label),
+          n ? h('span', { class: 'muted small' }, n) : null),
+        MARKER_TYPES[k] ? h('div', { class: 'map-legend' }, MARKER_TYPES[k].map(([, code, name]) => h('span', {}, legendIcon(k, code), name))) : null);
+    }));
+  }
+  async function importMapFile(input) {
+    const f = input.files && input.files[0];
+    if (!f) return;
+    let p;
+    try { p = JSON.parse(await f.text()); } catch { toast("That file isn't a site map."); return; }
+    if (!p || p.format !== 'koinos-site-map') { toast("That file isn't a Koinos site map."); return; }
+    const m = mapState();
+    const reset = !m.data || confirm('Replace the map. Keep the area names, teams and merges already set on it?\n\nOK = keep them · Cancel = use the ones in the file') === false;
+    toast('Uploading the map…', 8000);
+    const { error } = await sb.rpc('import_site_map', { p, p_reset_areas: !!reset && !!m.data });
+    if (error) { toast(friendlyError(error)); return; }
+    await refreshTable('map_areas');
+    m.checked = false; m.vb = null;
+    await ensureSiteMap(true);
+    toast('Site map loaded');
+  }
+  function importCard() {
+    return h('div', { class: 'card' },
+      h('strong', {}, mapState().data ? 'Replace the map file' : 'Load the site map'),
+      h('p', { class: 'hint' }, 'Pick the site map file (koinos-site-map.json). It goes into the database for approved team members only. Never post it anywhere public.'),
+      h('input', { type: 'file', accept: '.json,application/json', onchange: (e) => importMapFile(e.target) }));
+  }
+
+  // ---- Saved views: a named set-up of the map (zoom, layers, whose exit routes,
+  // which markers) that admins save and SOPs show. #/map/<view id> opens one.
+  function applyMapView(v) {
+    const m = mapState(), st = v.settings || {};
+    m.layers = Object.assign(Object.fromEntries(MAP_LAYERS.map(([k]) => [k, k !== 'altpaths'])), st.layers || {});
+    m.pathTeam = st.pathTeam || '';
+    m.kinds = Array.isArray(st.kinds) ? st.kinds : null;
+    m.sel = null; m.selMarker = null; m.mode = null;
+    m.activeView = v.id;
+    m.pendingFit = st.vb || null;
+  }
+  const currentViewSettings = (kinds) => { const m = mapState(); return { vb: m.vb, layers: Object.assign({}, m.layers), pathTeam: m.pathTeam || null, kinds: kinds || null }; };
+  function kindsField(current) {
+    const m = mapState();
+    const on = MAP_LAYERS.filter(([k]) => MARKER_TYPES[k] && m.layers[k]).map(([k]) => k);
+    return on.flatMap((L) => MARKER_TYPES[L].map(([kind, , name]) => ({ name: 'k_' + kind, type: 'checkbox', label: name, default: !current || current.includes(kind) })));
+  }
+  const kindsFrom = (vals) => { const picked = Object.keys(vals).filter((k) => k.startsWith('k_') && vals[k]).map((k) => k.slice(2)); const all = Object.keys(vals).filter((k) => k.startsWith('k_')); return picked.length === all.length ? null : picked; };
+  function saveMapView(existing) {
+    const m = mapState();
+    const kf = kindsField(existing ? (existing.settings || {}).kinds : m.kinds);
+    openForm({
+      title: existing ? 'Update saved view' : 'Save this view',
+      intro: existing ? 'Saves the map as it is on screen now (zoom, layers and exit routes) under this view. SOPs showing it update too.'
+        : 'Saves the map as it is on screen now: the zoom, the layers that are on, and whose exit routes. Use it in an SOP with the editor\'s Map view button.',
+      fields: [{ name: 'name', label: 'Name', placeholder: 'e.g. Fire: extinguishers & exits' },
+        ...(kf.length ? [{ name: 'k_hint', type: 'custom', label: 'Markers to show', build: () => ({ get: () => null }) }] : []), ...kf],
+      values: { name: existing ? existing.name : '' },
+      onSubmit: async (v) => {
+        const name = String(v.name || '').trim().slice(0, 80);
+        if (!name) throw new Error('Give the view a name.');
+        delete v.k_hint;
+        const settings = currentViewSettings(kindsFrom(v));
+        const res = existing
+          ? await sb.from('map_views').update({ name, settings }).eq('id', existing.id).select().single()
+          : await sb.from('map_views').insert({ name, settings, sort_order: state.data.map_views.length }).select().single();
+        if (res.error) throw res.error;
+        await refreshTable('map_views');
+        m.activeView = res.data.id;
+        m.kinds = settings.kinds;
+        toast(existing ? 'View updated' : 'View saved');
+        render();
+      }
+    });
+  }
+  async function deleteMapView(v) {
+    if (!confirm(`Delete the saved view "${v.name}"? SOPs that show it will show nothing there (admins see a note).`)) return;
+    const { error } = await sb.from('map_views').delete().eq('id', v.id);
+    if (error) { toast(friendlyError(error)); return; }
+    const m = mapState(); if (m.activeView === v.id) m.activeView = null;
+    await refreshTable('map_views');
+    if (route()[1] === v.id) location.hash = '#/map'; else render();
+  }
+  const mapViewsSorted = () => state.data.map_views.slice().sort((a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
+  function mapViewsCard() {
+    const m = mapState();
+    const views = mapViewsSorted();
+    const active = mapViewById(m.activeView);
+    if (!views.length && !isAdmin()) return null;
+    return h('div', { class: 'card' },
+      views.length ? h('select', { class: 'search', 'aria-label': 'Open a saved view', onchange: (e) => { const id = e.target.value; e.target.value = ''; if (id) location.hash = '#/map/' + id; } },
+        h('option', { value: '' }, 'Open a saved view…'), views.map((v) => h('option', { value: v.id }, v.name))) : null,
+      active ? h('div', { class: 'row map-active-view' },
+        h('div', { class: 'grow' }, h('div', { class: 'muted small' }, 'Showing saved view'), h('strong', {}, active.name)),
+        isAdmin() ? h('button', { class: 'btn small', onclick: () => saveMapView(active) }, 'Update') : null,
+        isAdmin() ? h('button', { class: 'btn small danger', onclick: () => deleteMapView(active) }, 'Delete') : null) : null,
+      m.kinds ? h('div', { class: 'row map-active-view' },
+        h('div', { class: 'grow muted small' }, 'Only some markers are shown: ' + m.kinds.map((k) => (markerInfo(k) || { name: k }).name).join(', ')),
+        h('button', { class: 'btn small', onclick: () => { m.kinds = null; render(); } }, 'Show all')) : null,
+      isAdmin() ? h('div', { class: 'actions' },
+        h('button', { class: 'btn small primary', onclick: () => saveMapView(null) }, 'Save this view'),
+        h('span', { class: 'muted small' }, 'Saved views can be shown in SOPs.')) : null);
+  }
+  // Pick a saved view to show in an SOP (from the SOP editor).
+  function pickMapViewDialog() {
+    return new Promise((resolve) => {
+      let result = null;
+      const dlg = h('dialog', { class: 'sop-picker' });
+      const choose = (r) => { result = r; dlg.close(); };
+      const views = mapViewsSorted();
+      append(dlg, [
+        h('div', { class: 'dlg-head' }, h('h2', {}, 'Show a map view'),
+          h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: () => dlg.close() }, icon('x'))),
+        h('div', { class: 'dlg-body' },
+          h('p', { class: 'muted small' }, 'Readers see this view of the site map in the SOP and tap it to open the Map tab on it, with Return to SOP. Changing the view on the Map tab (Update) changes it here too.'),
+          views.length ? h('div', { class: 'sop-picker-list' }, views.map((v) => h('button', { type: 'button', class: 'sop-picker-item tc-red', onclick: () => choose({ id: v.id, title: v.name }) }, h('span', { class: 'grow' }, v.name))))
+            : h('div', { class: 'sop-empty' }, 'No saved views yet. On the Map tab, set the map up the way you want it, then tap Save this view.')),
+        h('div', { class: 'dlg-foot' }, h('div', { class: 'spacer' }), h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Cancel'))
+      ]);
+      dlg.addEventListener('close', () => { dlg.remove(); resolve(result); });
+      document.body.append(dlg);
+      dlg.showModal();
+    });
+  }
+  // A saved view inside an SOP: a picture of the map; tap to open it on the Map tab.
+  function sopMapFigure(id) {
+    const v = mapViewById(id);
+    if (!v) return isAdmin() ? h('div', { class: 'rt-img missing' }, 'A map view was here (it was deleted). Edit the SOP to remove or replace it.') : null;
+    const m = mapState();
+    if (!m.data) {
+      ensureSiteMap();
+      return h('div', { class: 'rt-img missing' }, m.checked && !m.loading ? 'The site map hasn\'t been loaded yet.' : 'Loading map…');
+    }
+    const st = v.settings || {};
+    const vb = st.vb || m.data.views.ours;
+    const o = { layers: Object.assign(Object.fromEntries(MAP_LAYERS.map(([k]) => [k, k !== 'altpaths'])), st.layers || {}), pathTeam: st.pathTeam || '', kinds: Array.isArray(st.kinds) ? st.kinds : null, sel: null, selMarker: null, mode: null, vb };
+    const svg = buildMapSvg(o);
+    svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+    svg.setAttribute('width', Math.round(vb.w)); svg.setAttribute('height', Math.round(vb.h));
+    svg.classList.add('static');
+    drawMarkers(svg, vb.w / 60, o);
+    return h('a', { class: 'rt-map', href: '#/map/' + v.id, 'aria-label': v.name + '. Open it on the Map tab' }, svg,
+      h('span', { class: 'rt-map-cap' }, h('strong', {}, v.name), h('span', {}, 'Tap to open the map')));
+  }
+
+  function mapView(id) {
+    const m = mapState();
+    ensureSiteMap();
+    // Opening #/map/<view id> sets the map up as that saved view (once per visit).
+    if (id !== m.routeId && m.data) {
+      m.routeId = id;
+      const v = mapViewById(id);
+      if (v) applyMapView(v); else if (!id) m.activeView = m.activeView || null;
+    }
+    if (m.error === 'missing') return { title: 'Site map', content: [h('div', { class: 'notice' }, 'The database needs updating for the site map (run supabase/schema.sql).')] };
+    if (!m.data) {
+      return { title: 'Site map', content: [
+        m.loading || !m.checked ? h('div', { class: 'empty' }, h('div', { class: 'spinner' })) : empty("The site map hasn't been set up yet." + (isAdmin() ? '' : ' An admin loads it from this screen.'), 'shield'),
+        isAdmin() && m.checked ? importCard() : null] };
+    }
+    const D = m.data, areas = mapAreas();
+    const svg = buildMapSvg();
+    const go = (rect) => { fitMap(svg, rect); };
+    const teamBox = (id) => {
+      const ps = areas.filter((a) => a.team_id === id && !a.out).flatMap((a) => a.poly);
+      if (!ps.length) return D.views.ours;
+      const xs = ps.map((p) => p[0]), ys = ps.map((p) => p[1]);
+      return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+    };
+    mapGestures(svg, (e) => mapTap(svg, e));
+    const zoomBtn = (label, f) => h('button', { type: 'button', 'aria-label': label === '+' ? 'Zoom in' : 'Zoom out', onclick: () => { const r = svg.getBoundingClientRect(); zoomMap(svg, f, r.left + r.width / 2, r.top + r.height / 2); } }, label);
+    const box = h('div', { class: 'map-box' }, svg,
+      h('div', { class: 'map-hud' },
+        h('div', { class: 'map-compass', 'aria-label': 'North is to the ' + (D.north || 'top') }, 'N →'),
+        zoomBtn('+', 0.7), zoomBtn('−', 1 / 0.7)),
+      m.mode ? h('div', { class: 'map-banner' }, m.mode === 'add' ? 'Tap the map where it goes' : 'Tap the area to merge in',
+        h('button', { type: 'button', onclick: () => { m.mode = null; render(); } }, 'Cancel')) : null);
+    // Set the view once the map is on screen (it needs its size), then draw markers at the right size.
+    requestAnimationFrame(() => {
+      if (!svg.isConnected) return;
+      if (m.pendingFit) { const f = m.pendingFit; m.pendingFit = null; fitMap(svg, f); }
+      else if (m.vb) mapViewBox(svg, m.vb); else go(D.views.ours);
+    });
+
+    const zoneOpts = [h('option', { value: '' }, 'Zoom to a zone or area…')];
+    if (showZones()) zoneOpts.push(h('optgroup', { label: 'Team zones' }, teamsSorted().map((t) => h('option', { value: 'team:' + t.id }, t.name + ' zone'))));
+    zoneOpts.push(h('optgroup', { label: 'Areas' }, (D.views.areas || []).map((v) => h('option', { value: 'area:' + v.id }, v.name))));
+    const controls = h('div', { class: 'card map-controls' },
+      h('div', { class: 'chips' },
+        h('button', { class: 'chip', onclick: () => go(D.views.site) }, 'Whole site'),
+        h('button', { class: 'chip', onclick: () => go(D.views.building) }, 'Building'),
+        h('button', { class: 'chip', onclick: () => go(D.views.ours) }, 'Our space')),
+      h('select', { class: 'search', 'aria-label': 'Zoom to a zone or area', onchange: (e) => {
+        const v = e.target.value; e.target.value = '';
+        if (v.startsWith('team:')) go(teamBox(v.slice(5)));
+        else if (v.startsWith('area:')) { const a = (D.views.areas || []).find((x) => x.id === v.slice(5)); if (a) go(a.b); }
+      } }, zoneOpts),
+      showZones() ? h('select', { class: 'search', 'aria-label': 'Show exit routes for', onchange: (e) => { m.pathTeam = e.target.value; render(); } },
+        h('option', { value: '' }, 'Exit routes for everyone'),
+        teamsSorted().map((t) => h('option', { value: t.id, selected: m.pathTeam === t.id ? true : null }, 'Exit routes for ' + t.name))) : null,
+      h('p', { class: 'hint' }, 'Drag to move, pinch or use + / − to zoom. Tap a room to see its exits.' + (isAdmin() ? ' Admins: tap a room to rename it, set its team or merge it.' : '')));
+
+    const ret = state.returnTo;
+    const back = ret ? h('button', { type: 'button', class: 'return-bar', onclick: () => returnToSop() },
+      h('span', { class: 'rb-arrow', 'aria-hidden': 'true' }, '‹'), h('span', { class: 'grow' }, h('span', { class: 'small' }, 'Return to SOP'), h('strong', {}, ret.title))) : null;
+    const content = [back, box, mapAreaPanel(areas), mapMarkerPanel(), mapViewsCard(), controls];
+    if (isAdmin()) {
+      const opts = Object.entries(MARKER_TYPES).map(([L, list]) => h('optgroup', { label: MAP_LAYERS.find(([k]) => k === L)[1] },
+        list.map(([kind, , name]) => h('option', { value: kind, selected: m.addKind === kind ? true : null }, name))));
+      content.push(h('div', { class: 'section-title' }, 'Add a marker'),
+        h('div', { class: 'card' },
+          h('select', { class: 'search', id: 'map-add-kind', 'aria-label': 'Marker type', onchange: (e) => { m.addKind = e.target.value; } }, opts),
+          h('input', { class: 'search', id: 'map-add-label', placeholder: 'Label (optional), e.g. Behind kitchen door', value: m.addLabel, maxlength: 80, oninput: (e) => { m.addLabel = e.target.value; } }),
+          h('button', { class: 'btn primary block', onclick: () => startMapMode('add') }, 'Place on map')));
+    }
+    content.push(h('div', { class: 'section-title' }, 'Layers'), mapLayersCard());
+    if (isAdmin()) content.push(h('div', { class: 'section-title' }, 'Map file'), importCard());
+    return { title: 'Site map', content };
   }
 
   function moreView() {

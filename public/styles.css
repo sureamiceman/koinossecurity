@@ -744,3 +744,74 @@ fieldset.declare legend { font-size: .85rem; font-weight: 700; color: var(--mute
 .return-bar .grow { display: flex; flex-direction: column; min-width: 0; }
 .return-bar .small { opacity: .8; font-size: .78rem; }
 .return-bar strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- Site map (More → Site map) ---------- */
+main:has(.map-box) { max-width: 1100px; }
+.map-box {
+  position: relative; height: 62vh; min-height: 320px; margin-bottom: 12px;
+  border-radius: var(--radius); overflow: hidden; background: #20262c; border: 1px solid var(--border);
+}
+.site-map { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+.site-map.dragging { cursor: grabbing; }
+.site-map.adding { cursor: crosshair; }
+.map-hud { position: absolute; right: 10px; top: 10px; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+.map-hud button, .map-compass {
+  background: rgba(20, 28, 36, .85); color: #fff; border: 1px solid rgba(255, 255, 255, .2); border-radius: 8px;
+  min-width: 38px; min-height: 36px; font-weight: 700; font-size: 1rem; cursor: pointer;
+}
+.map-compass { display: flex; align-items: center; justify-content: center; padding: 0 9px; font-size: .9rem; cursor: default; }
+.map-banner {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; white-space: nowrap;
+  background: #e03131; color: #fff; padding: 8px 14px; border-radius: 999px; font-weight: 600; font-size: .9rem;
+  display: flex; gap: 10px; align-items: center; box-shadow: 0 4px 14px rgba(0, 0, 0, .3);
+}
+.map-banner button { background: rgba(255, 255, 255, .22); color: #fff; border: 0; border-radius: 999px; padding: 3px 10px; font-weight: 600; cursor: pointer; }
+.map-controls select.search { margin-bottom: 8px; }
+.map-label { margin: 4px 0 6px; font-weight: 600; }
+.map-team-chip { border-left: 6px solid var(--tc); }
+.map-team-chip.on { background: var(--tc); border-color: var(--tc); color: #fff; }
+.map-layer { cursor: pointer; padding-top: 10px; padding-bottom: 10px; }
+.map-layer input { width: 20px; height: 20px; margin: 0; flex: none; }
+.map-sw { width: 14px; height: 14px; border-radius: 3px; flex: none; border: 1px solid rgba(0, 0, 0, .15); background: #888; }
+.sw-aerial { background: linear-gradient(135deg, #8a9a7b, #c9cfc6); }
+.sw-parking { background: #2f9e44; }
+.sw-plan { background: #1b232c; }
+.sw-unavail { background: #7d8894; }
+.sw-rooms { background: #fff; }
+.sw-zones { background: conic-gradient(#9c36b5 0 25%, #2f9e44 0 50%, #1c7ed6 0 75%, #f2b705 0); }
+.sw-streets { background: #3c4650; }
+.sw-paths, .sw-exits { background: #e03131; }
+.sw-altpaths { background: linear-gradient(#e03131 0 32%, #fff 32% 68%, #e03131 68%); }
+.sw-equip { background: #c92a2a; }
+.sw-util { background: #0c8599; }
+.map-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 0 14px 10px 48px; font-size: .78rem; color: var(--muted); border-bottom: 1px solid var(--border); }
+.map-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.map-legend-ic { width: 16px; height: 16px; }
+/* map text (inside the SVG) */
+.site-map text { font-family: "Arial Narrow", "Roboto Condensed", -apple-system, sans-serif; font-weight: 700; pointer-events: none; }
+.m-street { font-size: 22px; fill: #fff; letter-spacing: .12em; paint-order: stroke; stroke: rgba(0, 0, 0, .55); stroke-width: 3px; }
+.m-lot { font-size: 20px; fill: #fff; paint-order: stroke; stroke: rgba(0, 0, 0, .6); stroke-width: 3px; text-anchor: middle; }
+.m-lotsub { font-size: 12px; }
+.m-room { fill: #1b232c; text-anchor: middle; dominant-baseline: central; font-weight: 600; }
+.site-map.far .m-room { display: none; }
+.m-zone { font-size: 7px; letter-spacing: .16em; text-anchor: middle; dominant-baseline: central; paint-order: stroke; stroke: #fff; stroke-width: 2.2px; }
+.m-door { font-size: 10px; fill: #e03131; text-anchor: middle; dominant-baseline: central; }
+.m-exitnote { font-size: 7.5px; fill: #e03131; text-anchor: middle; dominant-baseline: central; letter-spacing: .04em; }
+.m-exitnote.sub { font-size: 6.5px; font-weight: 500; letter-spacing: 0; }
+.m-planbg { fill: rgba(255, 255, 255, .88); }
+.m-area { cursor: pointer; }
+.m-mk { cursor: pointer; }
+.m-mk.on .m-shape { stroke: #ffd43b; }
+.m-mk text, .m-legend-code { fill: #fff; text-anchor: middle; dominant-baseline: central; }
+.map-active-view { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
+/* a saved map view inside an SOP */
+.rt-map { display: block; margin: 12px 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; text-decoration: none; color: inherit; background: #20262c; }
+.site-map.static { width: 100%; height: auto; cursor: pointer; touch-action: auto; }
+.rt-map-cap { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 8px 12px; background: var(--surface); font-size: .88rem; }
+.rt-map-cap span { color: var(--muted); }
+/* the same, while editing an SOP */
+.sop-ed-map { display: flex; gap: 10px; align-items: flex-start; margin: 10px 0; padding: 12px; border: 2px dashed var(--border); border-radius: 10px; background: var(--bg); cursor: grab; }
+.sop-ed-map.ProseMirror-selectednode { border-color: var(--accent); }
+.sop-ed-map-ic { font-size: 1.4rem; line-height: 1; }
+.sop-ed-map-k { color: var(--muted); }
+.sop-ed-map-hint { display: block; color: var(--muted); font-size: .8rem; margin-top: 2px; }
