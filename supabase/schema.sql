@@ -2712,6 +2712,7 @@ grant execute on function public.set_contact_filters(uuid, uuid, uuid[]) to auth
 --                that are really one space). Admins change these on the map.
 --   map_markers  equipment and utility markers admins place on the map
 --                (fire extinguishers, AEDs, shut-offs…).
+--   map_views    saved views of the map, shown in SOPs.
 -- Members (approved accounts) can read all three; only admins change them.
 -- ---------------------------------------------------------------------
 create table if not exists public.site_map (
@@ -2781,6 +2782,29 @@ create policy map_markers_update on public.map_markers for update to authenticat
 create policy map_markers_delete on public.map_markers for delete to authenticated using (public.is_admin());
 revoke all on public.map_markers from anon, authenticated;
 grant select, insert, update, delete on public.map_markers to authenticated;
+
+-- Saved views: a named set-up of the map (zoom, layers, whose exit routes,
+-- which markers) admins save on the Map tab and SOPs show
+-- (<div data-mapview="<id>"> in the SOP).
+create table if not exists public.map_views (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null check (char_length(name) between 1 and 80),
+  settings    jsonb not null default '{}'::jsonb,
+  sort_order  int  not null default 0,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+alter table public.map_views enable row level security;
+drop policy if exists map_views_select on public.map_views;
+drop policy if exists map_views_insert on public.map_views;
+drop policy if exists map_views_update on public.map_views;
+drop policy if exists map_views_delete on public.map_views;
+create policy map_views_select on public.map_views for select to authenticated using (public.is_member());
+create policy map_views_insert on public.map_views for insert to authenticated with check (public.is_admin());
+create policy map_views_update on public.map_views for update to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy map_views_delete on public.map_views for delete to authenticated using (public.is_admin());
+revoke all on public.map_views from anon, authenticated;
+grant select, insert, update, delete on public.map_views to authenticated;
 
 -- Load (or replace) the map file. Areas already on the map keep the names,
 -- teams and merges admins gave them, unless p_reset_areas is true; areas the

@@ -803,3 +803,15 @@ main:has(.map-box) { max-width: 1100px; }
 .m-mk { cursor: pointer; }
 .m-mk.on .m-shape { stroke: #ffd43b; }
 .m-mk text, .m-legend-code { fill: #fff; text-anchor: middle; dominant-baseline: central; }
+.map-active-view { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
+/* a saved map view inside an SOP */
+.rt-map { display: block; margin: 12px 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; text-decoration: none; color: inherit; background: #20262c; }
+.site-map.static { width: 100%; height: auto; cursor: pointer; touch-action: auto; }
+.rt-map-cap { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 8px 12px; background: var(--surface); font-size: .88rem; }
+.rt-map-cap span { color: var(--muted); }
+/* the same, while editing an SOP */
+.sop-ed-map { display: flex; gap: 10px; align-items: flex-start; margin: 10px 0; padding: 12px; border: 2px dashed var(--border); border-radius: 10px; background: var(--bg); cursor: grab; }
+.sop-ed-map.ProseMirror-selectednode { border-color: var(--accent); }
+.sop-ed-map-ic { font-size: 1.4rem; line-height: 1; }
+.sop-ed-map-k { color: var(--muted); }
+.sop-ed-map-hint { display: block; color: var(--muted); font-size: .8rem; margin-top: 2px; }

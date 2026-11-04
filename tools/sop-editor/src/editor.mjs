@@ -14,6 +14,10 @@
 //   imageUrl(path)    → url | Promise<url>   something to show it with
 //   pickSop({ current }) → Promise<{ id, title } | { remove: true } | null>
 //   pickFilter({ current }) → same, for a contact filter ({ id, title })
+//   pickMapView({ current }) → Promise<{ id, title } | null>   a saved map view
+//   mapViewLabel(id) → text  the view's name, shown on its block while editing
+// Map views are saved as <div data-mapview="<view id>"></div>: readers see that
+// view of the site map there and tap it to open the Map tab on it.
 // Links to other SOPs are ordinary links to "#/sops/<id>"; links to a group
 // of contacts (a contact filter, e.g. "Medical") go to "#/contacts/<id>".
 import { Editor, Node } from '@tiptap/core';
@@ -78,6 +82,7 @@ export function fixWordLists(html) {
 export const SOP_HREF = /^#\/sops\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 export const PHOTO_PATH = /^sops\/[A-Za-z0-9-]{1,64}\.(jpg|png|webp)$/;
 export const CONTACTS_HREF = /^#\/contacts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+export const MAP_VIEW_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const safeUrl = (u) => /^(https?:\/\/|mailto:|tel:)/i.test(String(u || '').trim()) || SOP_HREF.test(String(u || '').trim()) || CONTACTS_HREF.test(String(u || '').trim());
 
 // A picture on its own line. Click it to select it (then Delete removes it,
@@ -130,6 +135,37 @@ const SopImage = Node.create({
   }
 });
 
+// A saved view of the site map on its own line (select it and press Delete to remove it).
+const SopMap = Node.create({
+  name: 'sopMap',
+  group: 'block',
+  atom: true,
+  draggable: true,
+  selectable: true,
+  addOptions() { return { mapViewLabel: () => '' }; },
+  addAttributes() {
+    return { view: { default: null, parseHTML: (e) => e.getAttribute('data-mapview'), renderHTML: (a) => ({ 'data-mapview': a.view }) } };
+  },
+  parseHTML() {
+    return [{ tag: 'div[data-mapview]', getAttrs: (e) => (MAP_VIEW_ID.test(e.getAttribute('data-mapview') || '') ? null : false) }];
+  },
+  renderHTML({ HTMLAttributes }) { return ['div', HTMLAttributes]; },
+  addNodeView() {
+    const label = this.options.mapViewLabel;
+    return ({ node }) => {
+      const name = el('strong', {});
+      const dom = el('div', { class: 'sop-ed-map', contenteditable: 'false' },
+        el('span', { class: 'sop-ed-map-ic', 'aria-hidden': 'true' }, '🗺'),
+        el('span', {}, el('span', { class: 'sop-ed-map-k' }, 'Map view: '), name,
+          el('span', { class: 'sop-ed-map-hint' }, 'Readers see this view of the map here and tap it to open the Map tab.')));
+      const show = (n) => { name.textContent = label(n.attrs.view) || '(deleted view)'; };
+      show(node);
+      let cur = node;
+      return { dom, update: (n) => { if (n.type !== cur.type) return false; if (n.attrs.view !== cur.attrs.view) show(n); cur = n; return true; } };
+    };
+  }
+});
+
 function el(tag, attrs = {}, ...kids) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -144,7 +180,7 @@ function el(tag, attrs = {}, ...kids) {
 
 const isImage = (f) => f && /^image\/(jpeg|png|webp|gif|heic|heif)$/i.test(f.type || '');
 
-export function create(container, { html = '', placeholder = '', uploadImage = null, imageUrl = null, pickSop = null, pickFilter = null } = {}) {
+export function create(container, { html = '', placeholder = '', uploadImage = null, imageUrl = null, pickSop = null, pickFilter = null, pickMapView = null, mapViewLabel = null } = {}) {
   const surface = el('div', { class: 'sop-ed-surface' });
   const bar = el('div', { class: 'sop-ed-bar', role: 'toolbar', 'aria-label': 'Formatting' });
   const tableBar = el('div', { class: 'sop-ed-bar table-bar hidden', role: 'toolbar', 'aria-label': 'Table' });
@@ -164,7 +200,8 @@ export function create(container, { html = '', placeholder = '', uploadImage = n
       Highlight,
       TableKit.configure({ table: { resizable: false } }),
       Placeholder.configure({ placeholder }),
-      SopImage.configure({ imageUrl: imageUrl || (() => null) })
+      SopImage.configure({ imageUrl: imageUrl || (() => null) }),
+      SopMap.configure({ mapViewLabel: mapViewLabel || (() => '') })
     ],
     editorProps: {
       attributes: { class: 'sop-ed rt rt-doc', 'aria-label': 'Procedure', 'aria-multiline': 'true' },
@@ -243,6 +280,12 @@ export function create(container, { html = '', placeholder = '', uploadImage = n
     else c.setLink({ href }).run();
   }
 
+  async function addMapView() {
+    const pick = await pickMapView({ current: null });
+    if (!pick || !pick.id || editor.isDestroyed) return;
+    editor.chain().focus().insertContent({ type: 'sopMap', attrs: { view: pick.id } }).run();
+  }
+
   const buttons = [];
   const btn = (label, title, run, isOn, can) => {
     const b = el('button', { type: 'button', class: 'sop-ed-btn', title, 'aria-label': title, onmousedown: (e) => e.preventDefault(), onclick: () => { run(); refresh(); } }, label);
@@ -288,6 +331,7 @@ export function create(container, { html = '', placeholder = '', uploadImage = n
     pickSop ? btn('SOP link', 'Link to another SOP', linkSop, () => SOP_HREF.test(editor.getAttributes('link').href || '')) : null,
     pickFilter ? btn('Contacts link', 'Link to a group of contacts (e.g. Medical)', linkFilter, () => CONTACTS_HREF.test(editor.getAttributes('link').href || '')) : null,
     uploadImage ? btn(picBtnLabel, 'Add a picture or map (you can also paste or drag one in)', () => fileInput.click(), null, () => !busy) : null,
+    pickMapView ? btn('Map view', 'Show a saved view of the site map (made on the Map tab)', addMapView) : null,
     btn('―', 'Divider line', () => chain().setHorizontalRule().run()),
     btn('Quote', 'Note / quote block', () => chain().toggleBlockquote().run(), () => editor.isActive('blockquote')),
     sep(),
