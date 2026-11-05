@@ -2867,6 +2867,19 @@ create policy map_views_delete on public.map_views for delete to authenticated u
 revoke all on public.map_views from anon, authenticated;
 grant select, insert, update, delete on public.map_views to authenticated;
 
+-- Zone colors (admins, Map tab): { zones: { <team id>: "#rrggbb" }, notOurs: "#rrggbb", opacity: 0.1–0.8 }.
+-- Kept apart from the map file so replacing the file keeps them.
+alter table public.site_map add column if not exists style jsonb not null default '{}'::jsonb;
+create or replace function public.save_map_style(p jsonb) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_admin() then raise exception 'Only admins can change the map colors'; end if;
+  if p is null or jsonb_typeof(p) <> 'object' or length(p::text) > 4000 then raise exception 'Invalid map colors'; end if;
+  update public.site_map set style = p, updated_at = now(), updated_by = auth.uid() where id = 1;
+end $$;
+revoke all on function public.save_map_style(jsonb) from public, anon;
+grant execute on function public.save_map_style(jsonb) to authenticated;
+
 -- Load (or replace) the map file. Areas already on the map keep the names,
 -- teams and merges admins gave them, unless p_reset_areas is true; areas the
 -- new file no longer has are removed. Teams in the file are matched by name.

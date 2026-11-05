@@ -4,6 +4,7 @@
 -- that showed one then show nothing there). Team colors are left as they
 -- are (change them under Manage teams if you want the old ones back).
 drop function if exists public.import_site_map(jsonb, boolean);
+drop function if exists public.save_map_style(jsonb);
 drop table if exists public.map_views;
 drop table if exists public.map_markers;
 drop table if exists public.map_categories;

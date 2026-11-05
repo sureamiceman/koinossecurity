@@ -824,3 +824,9 @@ main:has(.map-box) { max-width: 1100px; }
 .map-hits { display: flex; flex-direction: column; }
 .map-lock-check { display: flex; align-items: center; gap: 8px; margin: 2px 0 12px; font-size: .92rem; }
 .map-lock-check input { width: 18px; height: 18px; margin: 0; }
+/* zone colors */
+.zone-hint { margin-top: 0; }
+.zone-color-row { display: flex; align-items: center; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+.zone-color-row input[type=color] { width: 44px; height: 32px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; flex: none; }
+.zone-shade { margin: 12px 0 0; }
+.zone-shade input[type=range] { width: 100%; }

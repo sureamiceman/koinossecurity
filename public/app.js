@@ -4836,18 +4836,22 @@
     if (m.loading || (m.checked && !force)) return;
     m.loading = true;
     try {
-      if (!m.data) { const saved = await readMapCache(); if (saved && saved.data) { m.data = saved.data; m.version = saved.version; render(); } }
-      const { data: row, error } = await sb.from('site_map').select('version').eq('id', 1).maybeSingle();
+      if (!m.data) { const saved = await readMapCache(); if (saved && saved.data) { m.data = saved.data; m.version = saved.version; m.style = saved.style || {}; render(); } }
+      let { data: row, error } = await sb.from('site_map').select('version,style').eq('id', 1).maybeSingle();
+      if (error && /style/i.test(error.message || '')) ({ data: row, error } = await sb.from('site_map').select('version').eq('id', 1).maybeSingle());   // database not updated for zone colors yet
       if (error) { m.error = /does not exist|schema cache|could not find/i.test(error.message || '') ? 'missing' : ''; return; }
       m.error = '';
       m.checked = true;
       const v = (row && row.version) || 0;
+      if (row && row.style) m.style = row.style;
       if (!v) { m.data = null; m.version = 0; return; }
       if (v !== m.version || !m.data) {
         const { data: full, error: e2 } = await sb.from('site_map').select('version,data').eq('id', 1).single();
         if (e2) throw e2;
         m.data = full.data; m.version = full.version; m.vb = null;
-        await writeMapCache({ version: full.version, data: full.data });
+        await writeMapCache({ version: full.version, data: full.data, style: m.style });
+      } else if (row && row.style) {
+        await writeMapCache({ version: m.version, data: m.data, style: m.style });
       }
     } catch { /* offline: keep the saved copy */ } finally {
       m.loading = false;
@@ -4871,6 +4875,16 @@
   const gidOf = (a) => a.group || a.id;
   const showZones = () => teamsEnabled() || isAdmin();   // Teams off: members don't see team zones
   const teamHex = (t) => (t && TEAM_HEX[t.color]) || TEAM_HEX.gray;
+  // Zone colors (admins, Map tab → Zone colors): any color per team zone and for
+  // "Not our space", and how strong the shading is. A zone without its own color
+  // uses its team's color from Manage teams.
+  const HEX = /^#[0-9a-f]{6}$/i;
+  const NOT_OURS_HEX = '#9aa4ae';
+  const mapStyle = () => mapState().style || {};
+  const zoneHex = (t) => { const z = (mapStyle().zones || {})[t && t.id]; return HEX.test(z || '') ? z : teamHex(t); };
+  const notOursHex = () => (HEX.test(mapStyle().notOurs || '') ? mapStyle().notOurs : NOT_OURS_HEX);
+  const zoneOpacity = () => { const v = Number(mapStyle().opacity); return v >= 0.1 && v <= 0.8 ? v : 0.36; };
+  const darker = (hex, k = 0.55) => '#' + [1, 3, 5].map((i) => Math.round(parseInt(hex.slice(i, i + 2), 16) * k).toString(16).padStart(2, '0')).join('');
   const isGenericName = (n) => /^Room \d+$/.test(n || '');
 
   // Exit routes. The file has every area's route to every exit; the rules pick
@@ -4998,8 +5012,8 @@
     const arrow = (id, size, ref) => { const mk = sv('marker', { id, viewBox: '0 0 10 10', refX: ref, refY: 5, markerWidth: size, markerHeight: size, orient: 'auto' }, defs); sv('path', { d: 'M0 0L10 5L0 10z', fill: EXIT_RED }, mk); };
     arrow('map-arrow', 3.2, 6); arrow('map-arrow-alt', 3, 5); arrow('map-arrow-out', 4, 7);
     const pat = sv('pattern', { id: 'map-hatch', width: 6, height: 6, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, defs);
-    sv('rect', { width: 6, height: 6, fill: '#9aa4ae', 'fill-opacity': 0.55 }, pat);
-    sv('line', { x1: 0, y1: 0, x2: 0, y2: 6, stroke: '#59636d', 'stroke-width': 1.2 }, pat);
+    sv('rect', { width: 6, height: 6, fill: notOursHex(), 'fill-opacity': 0.55 }, pat);
+    sv('line', { x1: 0, y1: 0, x2: 0, y2: 6, stroke: darker(notOursHex()), 'stroke-width': 1.2 }, pat);
     const layer = (id) => { const g = sv('g', { id: 'ml-' + id }, svg); if (!o.layers[id]) g.setAttribute('display', 'none'); return g; };
 
     sv('image', { href: D.aerial, x: 0, y: 0, width: D.frame.w, height: D.frame.h }, layer('aerial'));
@@ -5021,8 +5035,8 @@
       const prim = areas.find((x) => x.id === gidOf(a)) || a;
       const t = zonesOn ? teamById(prim.team_id) : null;
       const on = o.sel === gidOf(a);
-      const fill = prim.out ? 'url(#map-hatch)' : t ? teamHex(t) : '#ffffff';
-      sv('polygon', { points: pts(a.poly), 'data-area': a.id, class: 'm-area', fill, 'fill-opacity': prim.out ? 1 : t ? 0.36 : on ? 0.5 : 0.01, stroke: on ? '#111' : 'none', 'stroke-width': on ? 1.6 : 0, 'stroke-linejoin': 'round' }, gZ);
+      const fill = prim.out ? 'url(#map-hatch)' : t ? zoneHex(t) : '#ffffff';
+      sv('polygon', { points: pts(a.poly), 'data-area': a.id, class: 'm-area', fill, 'fill-opacity': prim.out ? 1 : t ? zoneOpacity() : on ? 0.5 : 0.01, stroke: on ? '#111' : 'none', 'stroke-width': on ? 1.6 : 0, 'stroke-linejoin': 'round' }, gZ);
     });
     const plan = sv('g', { id: 'ml-plan' }, svg); if (!o.layers.plan) plan.setAttribute('display', 'none');
     sv('path', { d: D.plan.d, fill: '#1b232c', 'fill-rule': 'evenodd', transform: `translate(${D.plan.t.tx} ${D.plan.t.ty}) scale(${D.plan.t.sx} ${D.plan.t.sy})` }, plan);
@@ -5040,7 +5054,7 @@
       if (!rs.length) return;
       const big = rs.reduce((x, y) => (y.a > x.a ? y : x));
       const dy = isGenericName(big.name) ? 0 : labelSize(big) * 1.15;
-      sv('text', { class: 'm-zone', x: big.lx, y: big.ly + dy, fill: teamHex(t) }, gZ).textContent = t.name.toUpperCase();
+      sv('text', { class: 'm-zone', x: big.lx, y: big.ly + dy, fill: zoneHex(t) }, gZ).textContent = t.name.toUpperCase();
     });
     const gS = layer('streets');
     (D.streets || []).forEach((s) => { sv('text', { class: 'm-street', x: s.x, y: s.y }, gS).textContent = s.text; });
@@ -5354,6 +5368,35 @@
       }),
       h('div', { class: 'actions' }, h('button', { class: 'btn small', onclick: () => editCategory(null) }, '+ New category')));
   }
+  async function saveMapStyle(patch) {
+    const m = mapState();
+    const next = Object.assign({}, m.style || {}, patch);
+    next.zones = Object.assign({}, (m.style || {}).zones || {}, patch.zones || {});
+    for (const k of Object.keys(next.zones)) if (!HEX.test(next.zones[k] || '')) delete next.zones[k];
+    if (!HEX.test(next.notOurs || '')) delete next.notOurs;
+    const prev = m.style;
+    m.style = next;
+    render();
+    const { error } = await sb.rpc('save_map_style', { p: next });
+    if (error) { m.style = prev; render(); toast(friendlyError(error)); return; }
+    if (m.data) writeMapCache({ version: m.version, data: m.data, style: next });
+  }
+  function zoneColorsCard() {
+    const st = mapStyle();
+    const row = (id, label, value, isSet, onPick, onReset) => h('div', { class: 'zone-color-row' },
+      h('input', { type: 'color', id, value, 'aria-label': label + ' color', onchange: (e) => onPick(e.target.value) }),
+      h('span', { class: 'grow' }, label),
+      isSet ? h('button', { type: 'button', class: 'btn small', onclick: onReset }, 'Reset') : h('span', { class: 'muted small' }, 'default'));
+    return h('div', { class: 'card' },
+      h('p', { class: 'hint zone-hint' }, 'Colors for the team zones on the map (the team badges elsewhere keep their Manage teams color). Everyone sees these.'),
+      teamsSorted().map((t) => row('zc-' + t.id, t.name, zoneHex(t), !!(st.zones || {})[t.id],
+        (v) => saveMapStyle({ zones: { [t.id]: v } }),
+        () => saveMapStyle({ zones: { [t.id]: null } }))),   // a blank color is dropped = back to the team's color
+      row('zc-notours', 'Not our space', notOursHex(), !!st.notOurs, (v) => saveMapStyle({ notOurs: v }), () => saveMapStyle({ notOurs: null })),
+      h('div', { class: 'field zone-shade' }, h('label', { for: 'zc-shade' }, 'Shading strength'),
+        h('input', { type: 'range', id: 'zc-shade', min: 10, max: 80, step: 2, value: Math.round(zoneOpacity() * 100), onchange: (e) => saveMapStyle({ opacity: Number(e.target.value) / 100 }) }),
+        h('div', { class: 'hint' }, 'Lighter lets the floorplan show through; stronger makes the zones stand out.')));
+  }
   // Find an item: search marker titles, notes and categories.
   function mapSearchCard() {
     const m = mapState();
@@ -5594,6 +5637,7 @@
             iconSvg(catById(a.cat), 22, true), 'Locked / needs a key'),
           h('button', { class: 'btn primary block', onclick: () => startMapMode('add') }, 'Place on map')),
         h('div', { class: 'section-title' }, 'Marker categories'), categoriesCard());
+      if (showZones()) content.push(h('div', { class: 'section-title' }, 'Zone colors'), zoneColorsCard());
     }
     content.push(h('div', { class: 'section-title' }, 'Layers'), mapLayersCard());
     if (isAdmin()) content.push(h('div', { class: 'section-title' }, 'Map file'), importCard());
