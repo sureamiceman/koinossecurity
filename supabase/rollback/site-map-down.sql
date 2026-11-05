@@ -6,6 +6,8 @@
 drop function if exists public.import_site_map(jsonb, boolean);
 drop table if exists public.map_views;
 drop table if exists public.map_markers;
+drop table if exists public.map_categories;
+-- (uploaded category icons stay in photo storage under mapicons/; delete that folder in Supabase Storage if you want them gone)
 drop trigger if exists map_areas_touch on public.map_areas;
 drop function if exists public.map_areas_touch();
 drop table if exists public.map_areas;

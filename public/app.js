@@ -13,7 +13,7 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [], app_settings: [], background_checks: [], contact_filters: [], contact_filter_members: [], map_areas: [], map_markers: [], map_views: [] });
+  const emptyData = () => ({ bulletins: [], sops: [], sop_categories: [], contacts: [], contact_categories: [], roster: [], profiles: [], events: [], shifts: [], calendar_feeds: [], event_series: [], series_posts: [], rotation_slots: [], posts: [], post_replies: [], attendance_settings: [], attendance_sections: [], attendance_fields: [], attendance_counts: [], attendance_values: [], teams: [], team_activations: [], app_settings: [], background_checks: [], contact_filters: [], contact_filter_members: [], map_areas: [], map_categories: [], map_markers: [], map_views: [] });
   const state = {
     session: null,
     profile: null,
@@ -499,11 +499,12 @@
     contact_filters: (t) => t.select('*').order('sort_order'),   // "Admins only" filters come back to admins only
     contact_filter_members: (t) => t.select('*'),
     map_areas: (t) => t.select('*'),
+    map_categories: (t) => t.select('*').order('sort_order'),
     map_markers: (t) => t.select('*').order('created_at'),
     map_views: (t) => t.select('*').order('sort_order').order('name')
   };
   const attSince = () => isoDay(new Date(Date.now() - 200 * 864e5));
-  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'app_settings', 'background_checks', 'contact_filters', 'contact_filter_members', 'map_areas', 'map_markers', 'map_views', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
+  const OPTIONAL_TABLES = new Set(['sop_categories', 'contact_categories', 'teams', 'team_activations', 'app_settings', 'background_checks', 'contact_filters', 'contact_filter_members', 'map_areas', 'map_categories', 'map_markers', 'map_views', 'attendance_settings', 'attendance_sections', 'attendance_fields', 'attendance_counts', 'attendance_values']);
 
   function loadCachedData() {
     if (cacheGet('myBgOk') === false) state.myBgOk = false;
@@ -587,7 +588,7 @@
   }
 
   const photoPaths = () => new Set([...state.data.bulletins, ...state.data.roster, ...state.data.profiles, state.profile || {}, ...state.data.posts, ...state.data.post_replies]
-    .map((r) => r.photo_path).filter(Boolean));
+    .map((r) => r.photo_path).concat(state.data.map_categories.map((c) => c.icon_path)).filter(Boolean));
   async function resolvePhotos({ prune = false } = {}) {
     const want = photoPaths();
     const missing = [...want].filter((p) => !state.photoUrls[p]);
@@ -4771,28 +4772,39 @@
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const TEAM_HEX = { red: '#e03131', orange: '#f08c00', yellow: '#f2b705', green: '#2f9e44', teal: '#0c8599', blue: '#1c7ed6', purple: '#9c36b5', pink: '#d6336c', gray: '#868e96' };
   const EXIT_RED = '#e03131';
-  const MARKER_TYPES = {
-    exits: [['exit', 'EX', 'Exit door'], ['rally', 'RP', 'Rally point'], ['gather', 'GP', 'Gathering point']],
-    equip: [['ext', 'FE', 'Fire extinguisher'], ['aed', 'AED', 'AED'], ['firstaid', '+', 'First aid kit'], ['bleed', 'SB', 'Stop the Bleed kit'], ['pull', 'FA', 'Fire alarm pull station']],
-    util: [['elec', 'EP', 'Electrical panel'], ['gas', 'G', 'Gas shut-off'], ['water', 'W', 'Water shut-off'], ['hvac', 'H', 'HVAC unit / thermostat'], ['light', 'L', 'Light switches']]
+  const MAP_ICONS = {
+    fire: "<path d=\"M0 -10.5 L11 9.5 L-11 9.5 Z\" fill=\"#fff\" stroke=\"#d62828\" stroke-width=\"2\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/> <path d=\"M0.6 -3.2c2.6 2.4 4.3 4.6 4.3 7.2c0 2.6-2.2 4.3-4.9 4.3s-4.9-1.7-4.9-4.3c0-1.7 0.9-3 2-4c0.2 1.4 0.8 2.3 1.7 2.7c-0.3-2.4 0.4-4.3 1.8-5.9z\" fill=\"#d62828\"/> <path d=\"M0 2.2c1.1 1 1.8 1.9 1.8 3c0 1.1-0.8 1.9-1.8 1.9s-1.8-0.8-1.8-1.9c0-0.9 0.7-1.8 1.8-3z\" fill=\"#ffb703\"/>",
+    medical: "<rect x=\"-10\" y=\"-10\" width=\"20\" height=\"20\" rx=\"3.5\" fill=\"#fff\" stroke=\"#d62828\" stroke-width=\"2\"/> <path d=\"M-2.4 -6.5h4.8v4.1h4.1v4.8h-4.1v4.1h-4.8v-4.1h-4.1v-4.8h4.1z\" fill=\"#d62828\"/>",
+    electrical: "<rect x=\"-10\" y=\"-10\" width=\"20\" height=\"20\" rx=\"3.5\" fill=\"#fff\" stroke=\"#1971c2\" stroke-width=\"2\"/> <path d=\"M1.8 -7.5 L-5 1.2 H-0.6 L-2 7.5 L5 -1.4 H0.5 Z\" fill=\"#1971c2\" stroke-linejoin=\"round\" stroke-linecap=\"round\" stroke=\"#1971c2\" stroke-width=\"0.8\"/>",
+    thermostat: "<path d=\"M-11 -9.5 H11 L0 10.5 Z\" fill=\"#fff\" stroke=\"#343a40\" stroke-width=\"2\" stroke-linejoin=\"round\"/> <path d=\"M-5 -6.4 H5 M0 -6.4 V2.6\" stroke=\"#343a40\" stroke-width=\"2.8\" stroke-linecap=\"round\"/>",
+    water: "<circle r=\"10.5\" fill=\"#fff\" stroke=\"#1c7ed6\" stroke-width=\"2\"/> <path d=\"M0 -7 C3 -3 5 -0.5 5 2.4 A5 5 0 0 1 -5 2.4 C-5 -0.5 -3 -3 0 -7 Z\" fill=\"#1c7ed6\"/> <path d=\"M-2.2 2.2 A2.3 2.3 0 0 0 0 4.6\" fill=\"none\" stroke=\"#fff\" stroke-width=\"1.3\" stroke-linecap=\"round\"/>",
+    gas: "<circle r=\"10.5\" fill=\"#fff\" stroke=\"#495057\" stroke-width=\"2\"/> <text x=\"0\" y=\"0.4\" font-family=\"Arial Black, Arial, sans-serif\" font-weight=\"900\" font-size=\"7.6\" letter-spacing=\"-0.2\" fill=\"#343a40\" text-anchor=\"middle\" dominant-baseline=\"central\">GAS</text>",
+    cleaning: "<rect x=\"-10\" y=\"-10\" width=\"20\" height=\"20\" rx=\"4\" fill=\"#2b8a3e\"/> <path d=\"M5.8 -7.2 L-0.6 2.2\" stroke=\"#fff\" stroke-width=\"1.8\" stroke-linecap=\"round\"/> <path d=\"M-1.2 0.6 L1.6 2.6 L-1.4 8 L-8 5.6 Z\" fill=\"#fff\"/> <path d=\"M-3 7.3 L-1.6 4.4 M-5.3 6.5 L-3.6 3.5\" stroke=\"#2b8a3e\" stroke-width=\"0.9\" stroke-linecap=\"round\"/>",
+    office: "<rect x=\"-10\" y=\"-10\" width=\"20\" height=\"20\" rx=\"4\" fill=\"#7048e8\"/> <rect x=\"-7.5\" y=\"4\" width=\"15\" height=\"2.6\" rx=\"1.2\" fill=\"#fff\"/> <path d=\"M-6.6 1.6 L-6.6 -0.4 Q-6.6 -3.6 -3.2 -3.8 L6 -4.6 Q7.8 -4.6 7.6 -2.8 L7.2 -1 Q7 0.4 5.6 0.5 L-4 1.6 Z\" fill=\"#fff\"/> <circle cx=\"-5.2\" cy=\"2.6\" r=\"1.5\" fill=\"#7048e8\" stroke=\"#fff\" stroke-width=\"1.1\"/> <path d=\"M5.4 0.6 V4\" stroke=\"#fff\" stroke-width=\"1.4\"/>",
+    building: "<rect x=\"-10\" y=\"-10\" width=\"20\" height=\"20\" rx=\"4\" fill=\"#c2255c\"/> <path d=\"M-6.2 6.6 L2.2 -1.8\" stroke=\"#fff\" stroke-width=\"2.2\" stroke-linecap=\"round\"/> <path d=\"M-1.4 -4.4 L3.2 -8.4 L5.4 -6.6 L4.4 -5.4 L7.6 -2.2 L5.6 -0.2 L2.4 -3.4 L1.2 -2.2 Z\" fill=\"#fff\" stroke=\"#fff\" stroke-width=\"0.6\" stroke-linejoin=\"round\"/>",
+    misc: "<rect x=\"-10\" y=\"-10\" width=\"20\" height=\"20\" rx=\"4\" fill=\"#868e96\"/> <path d=\"M0 -6.8 L6.8 -3.4 V4 L0 7.4 L-6.8 4 V-3.4 Z\" fill=\"#fff\" stroke=\"#fff\" stroke-width=\"1.2\" stroke-linejoin=\"round\"/> <path d=\"M-6.8 -3.4 L0 0 L6.8 -3.4 M0 0 V7.4\" fill=\"none\" stroke=\"#868e96\" stroke-width=\"1.2\" stroke-linejoin=\"round\"/>"
   };
-  const MARKER_COLOR = { exits: EXIT_RED, equip: '#c92a2a', util: '#0c8599' };
+  const MAP_ICON_NAMES = { fire: 'Fire (red flame)', medical: 'Medical (red cross)', electrical: 'Electrical (blue bolt)', thermostat: 'Thermostat (T)', water: 'Water (blue drop)', gas: 'Gas (GAS)', cleaning: 'Cleaning (green broom)', office: 'Office (purple stapler)', building: 'Building (pink hammer)', misc: 'Miscellaneous (gray box)' };
+  const MAP_LOCK = "<g transform=\"translate(8 8)\"><circle r=\"5.2\" fill=\"#212529\" stroke=\"#fff\" stroke-width=\"1.2\"/> <path d=\"M-1.7 -0.6 V-1.9 A1.7 1.7 0 0 1 1.7 -1.9 V-0.6\" fill=\"none\" stroke=\"#fff\" stroke-width=\"1.1\"/> <rect x=\"-2.5\" y=\"-0.7\" width=\"5\" height=\"3.6\" rx=\"0.6\" fill=\"#fff\"/></g>";
+  const MARKER_GROUPS = [['emergency', 'Emergency equipment'], ['facilities', 'Facilities'], ['supplies', 'Supplies']];
+  const MARKER_PX = 20;   // markers stay this size on screen at any zoom
   const MAP_LAYERS = [
     ['aerial', 'Aerial photo'], ['parking', 'Parking'], ['plan', 'Floorplan'], ['unavail', "Areas we can't use"],
     ['rooms', 'Room names'], ['zones', 'Team zones'], ['streets', 'Street names'],
     ['paths', 'Exit routes'], ['altpaths', 'Alternate exit routes'], ['exits', 'Exits & Gathering'],
-    ['equip', 'Emergency Equipment'], ['util', 'HVAC / Lights / Plumbing']
+    ...MARKER_GROUPS
   ];
   const mapState = () => state.map || (state.map = {
     data: null, version: 0, checked: false, loading: false, error: '', vb: null,
     layers: Object.assign(Object.fromEntries(MAP_LAYERS.map(([k]) => [k, k !== 'altpaths'])), cacheGet('mapLayers') || {}),
-    sel: null, selMarker: null, mode: null, addKind: 'ext', addLabel: '', pathTeam: '',
-    kinds: null,        // marker kinds to show (null = all), set by a saved view
+    sel: null, selMarker: null, mode: null, pathTeam: '', query: '',
+    add: { cat: '', title: '', note: '', locked: false },   // the "Add a marker" form
+    cats: null,         // marker categories to show (null = all), set by a saved view or the layer list
     activeView: null,   // the saved view last opened
     routeId: undefined, pendingFit: null
   });
   // Everything that decides what a drawing of the map shows.
-  const viewOpts = () => { const m = mapState(); return { layers: m.layers, pathTeam: m.pathTeam, sel: m.sel, selMarker: m.selMarker, mode: m.mode, vb: m.vb, kinds: m.kinds }; };
+  const viewOpts = () => { const m = mapState(); return { layers: m.layers, pathTeam: m.pathTeam, sel: m.sel, selMarker: m.selMarker, mode: m.mode, vb: m.vb, cats: m.cats }; };
   const mapViewById = (id) => id && state.data.map_views.find((v) => v.id === id);
 
   async function readMapCache() {
@@ -4920,27 +4932,46 @@
     });
   }
 
-  function markerShape(layer, g, r) {
-    const c = MARKER_COLOR[layer];
-    if (layer === 'exits') return sv('circle', { class: 'm-shape', r, fill: c, stroke: '#fff', 'stroke-width': r * 0.18 }, g);
-    if (layer === 'equip') return sv('rect', { class: 'm-shape', x: -r, y: -r, width: 2 * r, height: 2 * r, rx: r * 0.3, fill: c, stroke: '#fff', 'stroke-width': r * 0.18 }, g);
-    return sv('polygon', { class: 'm-shape', points: `0,${-r * 1.25} ${r * 1.25},0 0,${r * 1.25} ${-r * 1.25},0`, fill: c, stroke: '#fff', 'stroke-width': r * 0.18 }, g);
+  // Marker categories (admins manage them on the Map tab): a name, a group and
+  // an icon: one of the built-in ones, or a picture an admin uploaded.
+  const catsSorted = () => state.data.map_categories.slice().sort((a, b) => MARKER_GROUPS.findIndex(([g]) => g === a.grp) - MARKER_GROUPS.findIndex(([g]) => g === b.grp) || (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
+  const catById = (id) => id && state.data.map_categories.find((c) => c.id === id);
+  const catVisible = (c, o) => !!c && !!o.layers[c.grp] && (!o.cats || o.cats.includes(c.id));
+  // The icon, centered on 0,0, about 24 units across.
+  function markerIcon(c, parent, locked) {
+    const g = sv('g', {}, parent);
+    const url = c && c.icon_path && state.photoUrls[c.icon_path];
+    if (url) {
+      sv('rect', { x: -11, y: -11, width: 22, height: 22, rx: 4, fill: '#fff', stroke: '#868e96', 'stroke-width': 1 }, g);
+      sv('image', { href: url, x: -10, y: -10, width: 20, height: 20, preserveAspectRatio: 'xMidYMid meet' }, g);
+    } else {
+      g.innerHTML = MAP_ICONS[(c && c.icon) || 'misc'] || MAP_ICONS.misc;   // built-in icons are fixed text in this file
+    }
+    if (locked) { const l = sv('g', {}, g); l.innerHTML = MAP_LOCK; }
+    return g;
   }
-  const markerInfo = (kind) => { for (const L in MARKER_TYPES) for (const t of MARKER_TYPES[L]) if (t[0] === kind) return { layer: L, code: t[1], name: t[2] }; return null; };
-  function drawMarkers(svg, fixedR, o) {
+  function iconSvg(c, px, locked) {
+    const s = sv('svg', { viewBox: '-12.5 -12.5 25 25', width: px, height: px, class: 'map-icon', 'aria-hidden': 'true', overflow: 'visible' });
+    markerIcon(c, s, locked);
+    return s;
+  }
+  // unitsPerPx: map units per screen pixel (markers stay MARKER_PX on screen).
+  function drawMarkers(svg, unitsPerPx, o) {
     o = o || viewOpts();
-    const ctm = fixedR ? null : svg.getScreenCTM();
-    const r = fixedR || 9 / ((ctm && ctm.a) || 1);
-    for (const L of ['exits', 'equip', 'util']) {
-      const g = svg.querySelector('#ml-' + L + '-markers');
+    if (!unitsPerPx) { const ctm = svg.getScreenCTM(); unitsPerPx = 1 / ((ctm && ctm.a) || 1); }
+    const k = MARKER_PX * unitsPerPx / 25;
+    for (const [G] of MARKER_GROUPS) {
+      const g = svg.querySelector('#ml-' + G + '-markers');
       if (!g) continue;
       g.replaceChildren();
-      state.data.map_markers.filter((mk) => mk.layer === L && (!o.kinds || o.kinds.includes(mk.kind))).forEach((mk) => {
-        const ti = markerInfo(mk.kind); if (!ti) return;
-        const mg = sv('g', { class: 'm-mk' + (o.selMarker === mk.id ? ' on' : ''), 'data-marker': mk.id, transform: `translate(${mk.x} ${mk.y})` }, g);
-        sv('title', {}, mg).textContent = ti.name + (mk.label ? ': ' + mk.label : '');
-        markerShape(L, mg, r);
-        sv('text', { 'font-size': ti.code.length > 2 ? r * 0.78 : r * 1.05 }, mg).textContent = ti.code;
+      state.data.map_markers.forEach((mk) => {
+        const c = catById(mk.category_id);
+        if (!c || c.grp !== G || !catVisible(c, o)) return;
+        const mg = sv('g', { class: 'm-mk' + (o.selMarker === mk.id ? ' on' : ''), 'data-marker': mk.id, transform: `translate(${mk.x} ${mk.y}) scale(${k})` }, g);
+        sv('title', {}, mg).textContent = (mk.title || c.name) + (mk.locked ? ' (locked)' : '');
+        if (o.selMarker === mk.id) sv('circle', { r: 16, fill: 'rgba(255,212,59,.35)', stroke: '#f59f00', 'stroke-width': 2.5 }, mg);
+        sv('circle', { r: 13, fill: 'transparent' }, mg);   // easier to tap
+        markerIcon(c, mg, mk.locked);
       });
     }
   }
@@ -5019,9 +5050,7 @@
       sv('text', { class: 'm-exitnote', y: -3 }, g).textContent = 'EMERGENCY EXIT ONLY';
       sv('text', { class: 'm-exitnote sub', y: 7 }, g).textContent = 'through neighboring business';
     }
-    sv('g', { id: 'ml-exits-markers' }, gE);
-    sv('g', { id: 'ml-equip-markers' }, layer('equip'));
-    sv('g', { id: 'ml-util-markers' }, layer('util'));
+    for (const [G] of MARKER_GROUPS) sv('g', { id: 'ml-' + G + '-markers' }, layer(G));
     return svg;
   }
 
@@ -5098,16 +5127,23 @@
     const t = document.elementFromPoint(e.clientX, e.clientY);
     const mk = t && t.closest ? t.closest('[data-marker]') : null;
     const ar = t && t.closest ? t.closest('[data-area]') : null;
-    if (m.mode === 'add') {
+    if (m.mode === 'add' || m.mode === 'move') {
       const p = toMapPoint(svg, e.clientX, e.clientY);
-      const ti = markerInfo(m.addKind);
+      const at = { x: +p.x.toFixed(1), y: +p.y.toFixed(1) };
+      const mode = m.mode;
       m.mode = null;
-      const { data, error } = await sb.from('map_markers').insert({ layer: ti.layer, kind: m.addKind, label: m.addLabel.trim(), x: +p.x.toFixed(1), y: +p.y.toFixed(1) }).select().single();
-      if (error) { toast(friendlyError(error)); render(); return; }
-      m.addLabel = ''; m.layers[ti.layer] = true; cacheSet('mapLayers', m.layers);
+      const a = m.add, c = catById(a.cat);
+      const res = mode === 'move'
+        ? await sb.from('map_markers').update(at).eq('id', m.selMarker).select().single()
+        : await sb.from('map_markers').insert(Object.assign({ category_id: a.cat, title: a.title.trim(), note: a.note.trim(), locked: !!a.locked }, at)).select().single();
+      if (res.error) { toast(friendlyError(res.error)); render(); return; }
+      if (mode === 'add') {
+        m.add = { cat: a.cat, title: '', note: '', locked: false };
+        if (c) { m.layers[c.grp] = true; cacheSet('mapLayers', m.layers); if (m.cats && !m.cats.includes(c.id)) m.cats.push(c.id); }
+      }
       await refreshTable('map_markers');
-      m.selMarker = data.id; m.sel = null;
-      toast(ti.name + ' placed');
+      m.selMarker = res.data.id; m.sel = null;
+      toast(mode === 'move' ? 'Moved' : (res.data.title || 'Marker') + ' placed');
       render();
       return;
     }
@@ -5132,7 +5168,11 @@
   function startMapMode(mode) {
     const m = mapState();
     m.mode = mode;
-    if (mode === 'add') { m.sel = null; m.selMarker = null; }
+    if (mode === 'add') {
+      if (!m.add.cat || !catById(m.add.cat)) { toast('Pick a category first.'); m.mode = null; return; }
+      if (!m.add.title.trim()) { toast('Give it a title, e.g. Plungers.'); m.mode = null; return; }
+      m.sel = null; m.selMarker = null;
+    }
     render();
     requestAnimationFrame(() => { const b = document.querySelector('.map-box'); if (b) b.scrollIntoView({ block: 'center', behavior: 'smooth' }); });
   }
@@ -5166,40 +5206,163 @@
     }
     return h('div', { class: 'card' }, body);
   }
+  function editMarker(mk) {
+    openForm({
+      title: 'Edit marker',
+      fields: [
+        { name: 'category_id', type: 'select', label: 'Category', options: catsSorted().map((c) => [c.id, MARKER_GROUPS.find(([g]) => g === c.grp)[1] + ' · ' + c.name]) },
+        { name: 'title', label: 'Title', placeholder: 'e.g. Plungers' },
+        { name: 'note', label: 'Note (optional)', placeholder: 'e.g. Top shelf, left. Key is in the office.' },
+        { name: 'locked', type: 'checkbox', label: 'Locked / needs a key', hint: 'Shows a small lock on the icon.' }
+      ],
+      values: { category_id: mk.category_id, title: mk.title, note: mk.note, locked: mk.locked },
+      onSubmit: async (v) => {
+        if (!v.title) throw new Error('Give it a title.');
+        const { error } = await sb.from('map_markers').update({ category_id: v.category_id, title: v.title.slice(0, 80), note: (v.note || '').slice(0, 200), locked: !!v.locked }).eq('id', mk.id);
+        if (error) throw error;
+        await refreshTable('map_markers'); toast('Saved'); render();
+      },
+      onDelete: async () => {
+        const { error } = await sb.from('map_markers').delete().eq('id', mk.id);
+        if (error) throw error;
+        mapState().selMarker = null; await refreshTable('map_markers'); toast('Marker deleted'); render();
+      },
+      deleteConfirm: 'Delete this marker?'
+    });
+  }
   function mapMarkerPanel() {
     const m = mapState();
     const mk = state.data.map_markers.find((x) => x.id === m.selMarker);
     if (!mk) return null;
-    const ti = markerInfo(mk.kind) || { name: mk.kind };
+    const c = catById(mk.category_id);
     return h('div', { class: 'card' },
       h('div', { class: 'row' },
-        h('div', { class: 'grow' }, h('strong', {}, ti.name), h('div', { class: 'muted small' }, mk.label || 'No label')),
-        isAdmin() ? h('button', { class: 'btn small danger', onclick: async () => {
-          if (!confirm('Delete this ' + ti.name.toLowerCase() + ' marker?')) return;
-          const { error } = await sb.from('map_markers').delete().eq('id', mk.id);
-          if (error) { toast(friendlyError(error)); return; }
-          m.selMarker = null; await refreshTable('map_markers'); render();
-        } }, 'Delete') : null,
-        h('button', { class: 'btn small', onclick: () => { m.selMarker = null; render(); } }, 'Done')));
+        iconSvg(c, 34, mk.locked),
+        h('div', { class: 'grow' }, h('strong', {}, mk.title || (c ? c.name : 'Marker')),
+          h('div', { class: 'muted small' }, (c ? c.name : '') + (mk.locked ? ' · Locked / needs a key' : '')),
+          mk.note ? h('div', { class: 'small' }, mk.note) : null),
+        h('button', { class: 'btn small', onclick: () => { m.selMarker = null; render(); } }, 'Done')),
+      isAdmin() ? h('div', { class: 'actions' },
+        h('button', { class: 'btn small', onclick: () => editMarker(mk) }, 'Edit'),
+        h('button', { class: 'btn small', onclick: () => startMapMode('move') }, 'Move')) : null);
   }
-  function legendIcon(layer, code) {
-    const s = sv('svg', { viewBox: '-12 -12 24 24', class: 'map-legend-ic', 'aria-hidden': 'true' });
-    markerShape(layer, s, 9);
-    sv('text', { class: 'm-legend-code', 'font-size': code.length > 2 ? 7 : 9.5 }, s).textContent = code;
-    return s;
-  }
+  // Layers: the map's own layers, then each marker group with its categories (each can be turned off).
   function mapLayersCard() {
     const m = mapState();
+    const setCat = (id, on) => {
+      const all = state.data.map_categories.map((c) => c.id);
+      let cur = m.cats ? m.cats.slice() : all.slice();
+      cur = on ? [...new Set([...cur, id])] : cur.filter((x) => x !== id);
+      m.cats = cur.length === all.length ? null : cur;
+      render();
+    };
     return h('div', { class: 'list map-layers' }, MAP_LAYERS.filter(([k]) => k !== 'zones' || showZones()).map(([k, label]) => {
-      const n = MARKER_TYPES[k] ? state.data.map_markers.filter((x) => x.layer === k).length : 0;
+      const isGroup = MARKER_GROUPS.some(([g]) => g === k);
+      const cats = isGroup ? catsSorted().filter((c) => c.grp === k) : [];
+      const n = isGroup ? state.data.map_markers.filter((x) => cats.some((c) => c.id === x.category_id)).length : 0;
       return h('div', {},
         h('label', { class: 'list-item map-layer' },
           h('input', { type: 'checkbox', id: 'map-layer-' + k, checked: m.layers[k] ? true : null, onchange: (e) => { m.layers[k] = e.target.checked; cacheSet('mapLayers', m.layers); render(); } }),
           h('span', { class: 'map-sw sw-' + k }),
           h('span', { class: 'grow' }, label),
           n ? h('span', { class: 'muted small' }, n) : null),
-        MARKER_TYPES[k] ? h('div', { class: 'map-legend' }, MARKER_TYPES[k].map(([, code, name]) => h('span', {}, legendIcon(k, code), name))) : null);
+        isGroup && cats.length ? h('div', { class: 'map-cats' }, cats.map((c) => {
+          const cn = state.data.map_markers.filter((x) => x.category_id === c.id).length;
+          return h('label', { class: 'map-cat' + (m.layers[k] ? '' : ' off') },
+            h('input', { type: 'checkbox', id: 'map-cat-' + c.id, checked: !m.cats || m.cats.includes(c.id) ? true : null, onchange: (e) => setCat(c.id, e.target.checked) }),
+            iconSvg(c, 20), h('span', { class: 'grow' }, c.name), cn ? h('span', { class: 'muted small' }, cn) : null);
+        })) : null);
     }));
+  }
+  // Admins: the category list (name, group, icon). An uploaded icon replaces the built-in one.
+  async function iconPng(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+      const N = 96, cv = document.createElement('canvas'); cv.width = N; cv.height = N;
+      const k = Math.min(N / img.naturalWidth, N / img.naturalHeight);
+      const w = img.naturalWidth * k, hh = img.naturalHeight * k;
+      cv.getContext('2d').drawImage(img, (N - w) / 2, (N - hh) / 2, w, hh);
+      return await new Promise((res) => cv.toBlob(res, 'image/png'));
+    } finally { URL.revokeObjectURL(url); }
+  }
+  function editCategory(c) {
+    const count = c ? state.data.map_markers.filter((x) => x.category_id === c.id).length : 0;
+    openForm({
+      title: c ? 'Edit category' : 'New category',
+      intro: c ? (count ? `${count} marker${count === 1 ? '' : 's'} use this category; changes show on all of them.` : null) : 'Markers in this category show its icon. Each marker gets its own title (e.g. Plungers, Spare keys).',
+      fields: [
+        { name: 'name', label: 'Name', placeholder: 'e.g. Cleaning' },
+        { name: 'grp', type: 'select', label: 'Group', options: MARKER_GROUPS },
+        { name: 'icon', type: 'select', label: 'Icon', options: Object.entries(MAP_ICON_NAMES) },
+        { name: 'photo', type: 'photo', label: 'Or upload your own icon', currentUrl: c && c.icon_path ? state.photoUrls[c.icon_path] : null,
+          hint: 'A simple square picture (PNG, JPG or WebP). It replaces the icon above; remove it to go back.' }
+      ],
+      values: { name: c ? c.name : '', grp: c ? c.grp : 'supplies', icon: c ? c.icon || 'misc' : 'misc' },
+      onSubmit: async (v, photo) => {
+        const name = String(v.name || '').trim().slice(0, 40);
+        if (!name) throw new Error('Give the category a name.');
+        let icon_path = c ? c.icon_path : null, old = null;
+        if (photo && photo.file) {
+          const blob = await iconPng(photo.file);
+          const path = `mapicons/${crypto.randomUUID()}.png`;
+          const { error } = await sb.storage.from('photos').upload(path, blob, { contentType: 'image/png', upsert: false });
+          if (error) throw error;
+          state.photoUrls[path] = URL.createObjectURL(blob);
+          old = icon_path; icon_path = path;
+        } else if (photo && photo.remove) { old = icon_path; icon_path = null; }
+        const row = { name, grp: v.grp, icon: v.icon, icon_path };
+        const res = c ? await sb.from('map_categories').update(row).eq('id', c.id) : await sb.from('map_categories').insert(Object.assign(row, { sort_order: state.data.map_categories.length }));
+        if (res.error) throw res.error;
+        if (old) removePhoto(old);
+        await refreshTable('map_categories'); await resolvePhotos();
+        toast(c ? 'Category saved' : 'Category added'); render();
+      },
+      onDelete: c ? async () => {
+        if (count) throw new Error(`Move or delete its ${count} marker${count === 1 ? '' : 's'} first.`);
+        const { error } = await sb.from('map_categories').delete().eq('id', c.id);
+        if (error) throw error;
+        if (c.icon_path) removePhoto(c.icon_path);
+        await refreshTable('map_categories'); toast('Category deleted'); render();
+      } : null,
+      deleteConfirm: c ? `Delete the category "${c.name}"?` : null
+    });
+  }
+  function categoriesCard() {
+    return h('div', { class: 'card' },
+      MARKER_GROUPS.map(([g, label]) => {
+        const cats = catsSorted().filter((c) => c.grp === g);
+        return h('div', { class: 'map-catgroup' }, h('div', { class: 'small muted map-label' }, label),
+          cats.length ? cats.map((c) => h('button', { type: 'button', class: 'map-catrow', onclick: () => editCategory(c) },
+            iconSvg(c, 24), h('span', { class: 'grow' }, c.name),
+            h('span', { class: 'muted small' }, state.data.map_markers.filter((x) => x.category_id === c.id).length + ' on map'), icon('chev')))
+            : h('div', { class: 'muted small' }, 'None yet'));
+      }),
+      h('div', { class: 'actions' }, h('button', { class: 'btn small', onclick: () => editCategory(null) }, '+ New category')));
+  }
+  // Find an item: search marker titles, notes and categories.
+  function mapSearchCard() {
+    const m = mapState();
+    const q = m.query.trim().toLowerCase();
+    const hits = q ? state.data.map_markers.filter((mk) => { const c = catById(mk.category_id); return `${mk.title} ${mk.note} ${c ? c.name : ''}`.toLowerCase().includes(q); }) : [];
+    const input = h('input', { class: 'search', type: 'search', id: 'map-search', placeholder: 'Find an item, e.g. plunger', value: m.query, 'aria-label': 'Find an item on the map',
+      oninput: (e) => { m.query = e.target.value; render(); } });
+    return h('div', { class: 'card map-search' }, input,
+      q ? (hits.length ? h('div', { class: 'map-hits' }, hits.map((mk) => {
+        const c = catById(mk.category_id);
+        return h('button', { type: 'button', class: 'map-catrow', onclick: () => showMarker(mk) },
+          iconSvg(c, 24, mk.locked), h('span', { class: 'grow' }, h('strong', {}, mk.title || (c && c.name)), mk.note ? h('span', { class: 'muted small' }, ' · ' + mk.note) : null));
+      })) : h('div', { class: 'muted small' }, 'Nothing on the map matches.')) : null);
+  }
+  function showMarker(mk) {
+    const m = mapState();
+    const c = catById(mk.category_id);
+    if (c) { m.layers[c.grp] = true; if (m.cats && !m.cats.includes(c.id)) m.cats.push(c.id); }
+    m.selMarker = mk.id; m.sel = null;
+    m.pendingFit = { x: mk.x - 70, y: mk.y - 50, w: 140, h: 100 };
+    m.query = '';
+    render();
+    requestAnimationFrame(() => { const b = document.querySelector('.map-box'); if (b) b.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
   }
   async function importMapFile(input) {
     const f = input.files && input.files[0];
@@ -5230,21 +5393,25 @@
     const m = mapState(), st = v.settings || {};
     m.layers = Object.assign(Object.fromEntries(MAP_LAYERS.map(([k]) => [k, k !== 'altpaths'])), st.layers || {});
     m.pathTeam = st.pathTeam || '';
-    m.kinds = Array.isArray(st.kinds) ? st.kinds : null;
+    m.cats = Array.isArray(st.cats) ? st.cats.filter((id) => catById(id)) : null;
     m.sel = null; m.selMarker = null; m.mode = null;
     m.activeView = v.id;
     m.pendingFit = st.vb || null;
   }
-  const currentViewSettings = (kinds) => { const m = mapState(); return { vb: m.vb, layers: Object.assign({}, m.layers), pathTeam: m.pathTeam || null, kinds: kinds || null }; };
-  function kindsField(current) {
+  const currentViewSettings = (cats) => { const m = mapState(); return { vb: m.vb, layers: Object.assign({}, m.layers), pathTeam: m.pathTeam || null, cats: cats || null }; };
+  // The marker categories a saved view shows: those in the groups that are on.
+  function catsField(current) {
     const m = mapState();
-    const on = MAP_LAYERS.filter(([k]) => MARKER_TYPES[k] && m.layers[k]).map(([k]) => k);
-    return on.flatMap((L) => MARKER_TYPES[L].map(([kind, , name]) => ({ name: 'k_' + kind, type: 'checkbox', label: name, default: !current || current.includes(kind) })));
+    return catsSorted().filter((c) => m.layers[c.grp]).map((c) => ({ name: 'c_' + c.id, type: 'checkbox', label: c.name, default: !current || current.includes(c.id) }));
   }
-  const kindsFrom = (vals) => { const picked = Object.keys(vals).filter((k) => k.startsWith('k_') && vals[k]).map((k) => k.slice(2)); const all = Object.keys(vals).filter((k) => k.startsWith('k_')); return picked.length === all.length ? null : picked; };
+  const catsFrom = (vals) => {
+    const all = Object.keys(vals).filter((k) => k.startsWith('c_'));
+    const picked = all.filter((k) => vals[k]).map((k) => k.slice(2));
+    return picked.length === all.length ? null : picked;
+  };
   function saveMapView(existing) {
     const m = mapState();
-    const kf = kindsField(existing ? (existing.settings || {}).kinds : m.kinds);
+    const kf = catsField(existing ? (existing.settings || {}).cats : m.cats);
     openForm({
       title: existing ? 'Update saved view' : 'Save this view',
       intro: existing ? 'Saves the map as it is on screen now (zoom, layers and exit routes) under this view. SOPs showing it update too.'
@@ -5256,14 +5423,14 @@
         const name = String(v.name || '').trim().slice(0, 80);
         if (!name) throw new Error('Give the view a name.');
         delete v.k_hint;
-        const settings = currentViewSettings(kindsFrom(v));
+        const settings = currentViewSettings(catsFrom(v));
         const res = existing
           ? await sb.from('map_views').update({ name, settings }).eq('id', existing.id).select().single()
           : await sb.from('map_views').insert({ name, settings, sort_order: state.data.map_views.length }).select().single();
         if (res.error) throw res.error;
         await refreshTable('map_views');
         m.activeView = res.data.id;
-        m.kinds = settings.kinds;
+        m.cats = settings.cats;
         toast(existing ? 'View updated' : 'View saved');
         render();
       }
@@ -5290,9 +5457,9 @@
         h('div', { class: 'grow' }, h('div', { class: 'muted small' }, 'Showing saved view'), h('strong', {}, active.name)),
         isAdmin() ? h('button', { class: 'btn small', onclick: () => saveMapView(active) }, 'Update') : null,
         isAdmin() ? h('button', { class: 'btn small danger', onclick: () => deleteMapView(active) }, 'Delete') : null) : null,
-      m.kinds ? h('div', { class: 'row map-active-view' },
-        h('div', { class: 'grow muted small' }, 'Only some markers are shown: ' + m.kinds.map((k) => (markerInfo(k) || { name: k }).name).join(', ')),
-        h('button', { class: 'btn small', onclick: () => { m.kinds = null; render(); } }, 'Show all')) : null,
+      m.cats ? h('div', { class: 'row map-active-view' },
+        h('div', { class: 'grow muted small' }, 'Only some markers are shown: ' + (m.cats.map((id) => (catById(id) || {}).name).filter(Boolean).join(', ') || 'none')),
+        h('button', { class: 'btn small', onclick: () => { m.cats = null; render(); } }, 'Show all')) : null,
       isAdmin() ? h('div', { class: 'actions' },
         h('button', { class: 'btn small primary', onclick: () => saveMapView(null) }, 'Save this view'),
         h('span', { class: 'muted small' }, 'Saved views can be shown in SOPs.')) : null);
@@ -5329,12 +5496,12 @@
     }
     const st = v.settings || {};
     const vb = st.vb || m.data.views.ours;
-    const o = { layers: Object.assign(Object.fromEntries(MAP_LAYERS.map(([k]) => [k, k !== 'altpaths'])), st.layers || {}), pathTeam: st.pathTeam || '', kinds: Array.isArray(st.kinds) ? st.kinds : null, sel: null, selMarker: null, mode: null, vb };
+    const o = { layers: Object.assign(Object.fromEntries(MAP_LAYERS.map(([k]) => [k, k !== 'altpaths'])), st.layers || {}), pathTeam: st.pathTeam || '', cats: Array.isArray(st.cats) ? st.cats : null, sel: null, selMarker: null, mode: null, vb };
     const svg = buildMapSvg(o);
     svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
     svg.setAttribute('width', Math.round(vb.w)); svg.setAttribute('height', Math.round(vb.h));
     svg.classList.add('static');
-    drawMarkers(svg, vb.w / 60, o);
+    drawMarkers(svg, vb.w / 560, o);
     return h('a', { class: 'rt-map', href: '#/map/' + v.id, 'aria-label': v.name + '. Open it on the Map tab' }, svg,
       h('span', { class: 'rt-map-cap' }, h('strong', {}, v.name), h('span', {}, 'Tap to open the map')));
   }
@@ -5369,7 +5536,7 @@
       h('div', { class: 'map-hud' },
         h('div', { class: 'map-compass', 'aria-label': 'North is to the ' + (D.north || 'top') }, 'N →'),
         zoomBtn('+', 0.7), zoomBtn('−', 1 / 0.7)),
-      m.mode ? h('div', { class: 'map-banner' }, m.mode === 'add' ? 'Tap the map where it goes' : 'Tap the area to merge in',
+      m.mode ? h('div', { class: 'map-banner' }, m.mode === 'add' ? 'Tap the map where it goes' : m.mode === 'move' ? 'Tap the new spot' : 'Tap the area to merge in',
         h('button', { type: 'button', onclick: () => { m.mode = null; render(); } }, 'Cancel')) : null);
     // Set the view once the map is on screen (it needs its size), then draw markers at the right size.
     requestAnimationFrame(() => {
@@ -5399,15 +5566,20 @@
     const ret = state.returnTo;
     const back = ret ? h('button', { type: 'button', class: 'return-bar', onclick: () => returnToSop() },
       h('span', { class: 'rb-arrow', 'aria-hidden': 'true' }, '‹'), h('span', { class: 'grow' }, h('span', { class: 'small' }, 'Return to SOP'), h('strong', {}, ret.title))) : null;
-    const content = [back, box, mapAreaPanel(areas), mapMarkerPanel(), mapViewsCard(), controls];
+    const content = [back, box, mapAreaPanel(areas), mapMarkerPanel(), mapSearchCard(), mapViewsCard(), controls];
     if (isAdmin()) {
-      const opts = Object.entries(MARKER_TYPES).map(([L, list]) => h('optgroup', { label: MAP_LAYERS.find(([k]) => k === L)[1] },
-        list.map(([kind, , name]) => h('option', { value: kind, selected: m.addKind === kind ? true : null }, name))));
+      const a = m.add;
+      if (!a.cat || !catById(a.cat)) a.cat = (catsSorted()[0] || {}).id || '';
       content.push(h('div', { class: 'section-title' }, 'Add a marker'),
         h('div', { class: 'card' },
-          h('select', { class: 'search', id: 'map-add-kind', 'aria-label': 'Marker type', onchange: (e) => { m.addKind = e.target.value; } }, opts),
-          h('input', { class: 'search', id: 'map-add-label', placeholder: 'Label (optional), e.g. Behind kitchen door', value: m.addLabel, maxlength: 80, oninput: (e) => { m.addLabel = e.target.value; } }),
-          h('button', { class: 'btn primary block', onclick: () => startMapMode('add') }, 'Place on map')));
+          h('select', { class: 'search', id: 'map-add-cat', 'aria-label': 'Category', onchange: (e) => { a.cat = e.target.value; render(); } },
+            MARKER_GROUPS.map(([g, label]) => h('optgroup', { label }, catsSorted().filter((c) => c.grp === g).map((c) => h('option', { value: c.id, selected: a.cat === c.id ? true : null }, c.name))))),
+          h('input', { class: 'search', id: 'map-add-title', placeholder: 'Title, e.g. Plungers', value: a.title, maxlength: 80, oninput: (e) => { a.title = e.target.value; } }),
+          h('input', { class: 'search', id: 'map-add-note', placeholder: 'Note (optional), e.g. Top shelf, left', value: a.note, maxlength: 200, oninput: (e) => { a.note = e.target.value; } }),
+          h('label', { class: 'map-lock-check' }, h('input', { type: 'checkbox', id: 'map-add-locked', checked: a.locked ? true : null, onchange: (e) => { a.locked = e.target.checked; } }),
+            iconSvg(catById(a.cat), 22, true), 'Locked / needs a key'),
+          h('button', { class: 'btn primary block', onclick: () => startMapMode('add') }, 'Place on map')),
+        h('div', { class: 'section-title' }, 'Marker categories'), categoriesCard());
     }
     content.push(h('div', { class: 'section-title' }, 'Layers'), mapLayersCard());
     if (isAdmin()) content.push(h('div', { class: 'section-title' }, 'Map file'), importCard());
