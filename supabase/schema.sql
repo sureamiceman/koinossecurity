@@ -2710,8 +2710,9 @@ grant execute on function public.set_contact_filters(uuid, uuid, uuid[]) to auth
 --   map_areas    each room / hallway on the map: its name, which team's
 --                zone it is in, "not our space", and merges (several areas
 --                that are really one space). Admins change these on the map.
---   map_markers  equipment and utility markers admins place on the map
---                (fire extinguishers, AEDs, shut-offs…).
+--   map_categories  marker categories (Fire, Medical, Cleaning…) with their icons.
+--   map_markers  items admins place on the map: a category, a title
+--                (e.g. Plungers), a note and "locked / needs a key".
 --   map_views    saved views of the map, shown in SOPs.
 -- Members (approved accounts) can read all three; only admins change them.
 -- ---------------------------------------------------------------------
@@ -2761,16 +2762,76 @@ drop trigger if exists map_areas_touch on public.map_areas;
 create trigger map_areas_touch before update on public.map_areas
   for each row execute function public.map_areas_touch();
 
+-- Marker categories: a name, a group (emergency / facilities / supplies) and
+-- an icon: a built-in one (icon) or a picture an admin uploaded (icon_path,
+-- in photos/mapicons/; it wins over icon). Admins manage them on the Map tab.
+create table if not exists public.map_categories (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null check (char_length(name) between 1 and 40),
+  grp         text not null default 'supplies' check (grp in ('emergency','facilities','supplies')),
+  icon        text not null default 'misc' check (icon ~ '^[a-z]{2,20}$'),
+  icon_path   text check (icon_path is null or icon_path ~ '^mapicons/[A-Za-z0-9-]{1,64}\.png$'),
+  sort_order  int  not null default 0,
+  created_at  timestamptz not null default now()
+);
+alter table public.map_categories enable row level security;
+drop policy if exists map_categories_select on public.map_categories;
+drop policy if exists map_categories_insert on public.map_categories;
+drop policy if exists map_categories_update on public.map_categories;
+drop policy if exists map_categories_delete on public.map_categories;
+create policy map_categories_select on public.map_categories for select to authenticated using (public.is_member());
+create policy map_categories_insert on public.map_categories for insert to authenticated with check (public.is_admin());
+create policy map_categories_update on public.map_categories for update to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy map_categories_delete on public.map_categories for delete to authenticated using (public.is_admin());
+revoke all on public.map_categories from anon, authenticated;
+grant select, insert, update, delete on public.map_categories to authenticated;
+
+-- First run: the starter categories (all can be renamed, re-iconed or removed).
+do $$ begin
+  if not exists (select 1 from public.map_categories) then
+    insert into public.map_categories (name, grp, icon, sort_order) values
+      ('Fire', 'emergency', 'fire', 0), ('Medical', 'emergency', 'medical', 1),
+      ('Electrical panel', 'facilities', 'electrical', 0), ('Thermostat', 'facilities', 'thermostat', 1),
+      ('Water shut-off', 'facilities', 'water', 2), ('Gas shut-off', 'facilities', 'gas', 3),
+      ('Cleaning', 'supplies', 'cleaning', 0), ('Office', 'supplies', 'office', 1),
+      ('Building', 'supplies', 'building', 2), ('Miscellaneous', 'supplies', 'misc', 3);
+  end if;
+end $$;
+
+-- Markers: one item on the map, in a category, with its own title and note.
 create table if not exists public.map_markers (
   id          uuid primary key default gen_random_uuid(),
-  layer       text not null check (layer in ('exits','equip','util')),
-  kind        text not null check (kind ~ '^[a-z]{2,12}$'),
-  label       text not null default '' check (char_length(label) <= 80),
+  category_id uuid references public.map_categories(id) on delete restrict,
+  title       text not null default '' check (char_length(title) <= 80),
+  note        text not null default '' check (char_length(note) <= 200),
+  locked      boolean not null default false,
   x           real not null,
   y           real not null,
   created_at  timestamptz not null default now(),
   created_by  uuid references public.profiles(id) on delete set null default auth.uid()
 );
+-- Upgrade from the first test version of this table (fixed marker types).
+do $$ begin
+  if exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'map_markers' and column_name = 'kind') then
+    alter table public.map_markers add column if not exists category_id uuid references public.map_categories(id) on delete restrict;
+    alter table public.map_markers add column if not exists title text not null default '';
+    alter table public.map_markers add column if not exists note text not null default '';
+    alter table public.map_markers add column if not exists locked boolean not null default false;
+    update public.map_markers mk set
+      category_id = (select c.id from public.map_categories c where c.icon = case mk.kind
+          when 'ext' then 'fire' when 'pull' then 'fire' when 'aed' then 'medical' when 'firstaid' then 'medical'
+          when 'bleed' then 'medical' when 'elec' then 'electrical' when 'light' then 'electrical' when 'gas' then 'gas'
+          when 'water' then 'water' when 'hvac' then 'thermostat' else 'misc' end order by c.sort_order limit 1),
+      title = left(coalesce(nullif(mk.label, ''), case mk.kind when 'ext' then 'Fire extinguisher' when 'aed' then 'AED'
+          when 'firstaid' then 'First aid kit' when 'bleed' then 'Stop the Bleed kit' when 'pull' then 'Fire alarm pull station'
+          when 'elec' then 'Electrical panel' when 'gas' then 'Gas shut-off' when 'water' then 'Water shut-off'
+          when 'hvac' then 'Thermostat' when 'light' then 'Light switches' else mk.kind end), 80);
+    alter table public.map_markers drop column kind, drop column layer, drop column label;
+  end if;
+end $$;
+delete from public.map_markers where category_id is null;
+alter table public.map_markers alter column category_id set not null;
+create index if not exists map_markers_category_idx on public.map_markers(category_id);
 alter table public.map_markers enable row level security;
 drop policy if exists map_markers_select on public.map_markers;
 drop policy if exists map_markers_insert on public.map_markers;
