@@ -107,6 +107,11 @@
   let toastTimer;
   function toast(msg, ms = 2800) {
     const t = document.getElementById('toast');
+    // An open window (dialog) covers everything else on the page, so show the
+    // message inside the top one, or it's hidden behind it.
+    const dlgs = document.querySelectorAll('dialog[open]');
+    const host = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
+    if (t.parentNode !== host) host.append(t);
     t.textContent = msg;
     t.classList.add('show');
     clearTimeout(toastTimer);
@@ -660,6 +665,10 @@
   // ------------------------------------------------------------------
   // Photos
   // ------------------------------------------------------------------
+  // iPhone photos are often HEIC files. Safari opens them; Chrome and most
+  // other browsers can't.
+  const isHeic = (file) => /hei[cf]/i.test((file && file.type) || '') || /\.(heic|heif)$/i.test((file && file.name) || '');
+  const HEIC_HELP = 'This is an iPhone photo in HEIC format, which this browser can\'t open. Drag it in from the Photos app instead (that turns it into a JPG), or in Photos use File → Export → Export 1 Photo with "JPEG", or use Safari.';
   async function resizeImage(file, max = 1400, quality = 0.85) {
     let src;
     try {
@@ -668,7 +677,11 @@
       src = await new Promise((resolve, reject) => {
         const img = new Image();
         img.onload = () => resolve(img);
-        img.onerror = () => reject(new Error('Could not read that image. Try a JPG or PNG photo.'));
+        img.onerror = () => {
+          // Logged so a picture that won't load can be traced (browser console).
+          console.warn('[photo] could not read image', { name: file && file.name, type: file && file.type, size: file && file.size });
+          reject(new Error(isHeic(file) ? HEIC_HELP : 'Could not read that image (' + ((file && (file.type || file.name)) || 'unknown type') + '). Try a JPG or PNG photo.'));
+        };
         img.src = URL.createObjectURL(file);
       });
     }
@@ -767,7 +780,8 @@
       if (cache) cache.put(photoKey(path), new Response(blob, { headers: { 'Content-Type': 'image/jpeg' } })).catch(() => {});
       return path;
     } catch (e) {
-      toast(navigator.onLine ? 'Could not add the picture: ' + friendlyError(e) : 'Pictures can only be added with a connection.', 5000);
+      console.warn('[photo] SOP picture not added', { name: file && file.name, type: file && file.type, size: file && file.size, error: e && e.message });
+      toast(!navigator.onLine ? 'Pictures can only be added with a connection.' : isHeic(file) ? HEIC_HELP : 'Could not add the picture: ' + friendlyError(e), isHeic(file) ? 12000 : 6000);
       throw e;
     }
   }

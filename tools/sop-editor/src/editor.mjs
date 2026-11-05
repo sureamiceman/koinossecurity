@@ -256,7 +256,9 @@ export function create(container, { html = '', placeholder = '', uploadImage = n
   }
   const fileInput = el('input', { type: 'file', accept: 'image/*', multiple: true, class: 'hidden', 'aria-hidden': 'true', tabindex: '-1' });
   fileInput.addEventListener('change', () => {
-    const files = [...(fileInput.files || [])].filter((f) => isImage(f) || /^image\//.test(f.type || ''));
+    // Every chosen file goes to the app, which explains any it can't use (e.g. iPhone HEIC photos)
+    // rather than skipping them without a word.
+    const files = [...(fileInput.files || [])];
     fileInput.value = '';
     if (files.length) addPictures(files, null);
   });
