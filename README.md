@@ -107,7 +107,8 @@ Mark each release in GitHub as a restore point: *Releases → Draft a new releas
 
 | Version | Feature | Pull request | Database undo |
 |---|---|---|---|
-| 2.2.0 | Site map: floorplan layers, team zones, exit routes, equipment markers; teams move to the map colors (Alpha purple, Bravo green, Charlie blue, Delta yellow) if they still had the original ones | (this PR) | `supabase/rollback/site-map-down.sql` |
+| 2.3.0 | Map marker categories (admin-managed, with icons; titled items with notes and a lock badge; Find an item); picture errors now show over open windows and explain iPhone HEIC photos | (this PR) | `supabase/rollback/site-map-down.sql` (removes the whole site map, categories included) |
+| 2.2.0 | Site map: floorplan layers, team zones, exit routes, equipment markers, saved views in SOPs; teams move to the map colors (Alpha purple, Bravo green, Charlie blue, Delta yellow) if they still had the original ones | #16 | `supabase/rollback/site-map-down.sql` |
 | 2.1.0 | Office Admin + background checks; phone number formatting; contact filters + SOP links to them | (this PR) | `supabase/rollback/release-2.1.0-down.sql` |
 | 2.0.0 | Production release: once-a-day attendance email (Complete / Complete and send, reopen to fix, missing-service warning); swipe follows the thumb | (this PR) | none needed (adds one function: `attendance_reopen`) |
 | 1.20.0 | View as member; App settings (Teams on/off, Rally Location); CCW/medical at sign-up; Contacts as one simple list; bottom bar order + swipe | (this PR) | `supabase/rollback/admin-tools-down.sql` |
