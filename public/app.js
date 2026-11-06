@@ -106,12 +106,18 @@
 
   let toastTimer;
   function toast(msg, ms = 2800) {
-    const t = document.getElementById('toast');
+    let t = document.getElementById('toast');
+    if (!t) { t = h('div', { id: 'toast', role: 'status', 'aria-live': 'polite' }); document.body.append(t); }
     // An open window (dialog) covers everything else on the page, so show the
-    // message inside the top one, or it's hidden behind it.
+    // message inside the top one, or it's hidden behind it. When that window
+    // closes the message moves back to the page (a closed window is deleted,
+    // and would take the message box with it).
     const dlgs = document.querySelectorAll('dialog[open]');
     const host = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
-    if (t.parentNode !== host) host.append(t);
+    if (t.parentNode !== host) {
+      host.append(t);
+      if (host !== document.body) host.addEventListener('close', () => { if (t.parentNode === host) document.body.append(t); }, { once: true });
+    }
     t.textContent = msg;
     t.classList.add('show');
     clearTimeout(toastTimer);
