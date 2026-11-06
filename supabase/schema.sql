@@ -2749,6 +2749,10 @@ revoke all on public.map_areas from anon, authenticated;
 grant select, update on public.map_areas to authenticated;
 -- Areas are added and removed only by import_site_map.
 
+-- Where an admin moved the room's name to (map units); null = placed automatically.
+alter table public.map_areas add column if not exists label_x real;
+alter table public.map_areas add column if not exists label_y real;
+
 create or replace function public.map_areas_touch() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin

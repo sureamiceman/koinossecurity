@@ -4875,10 +4875,117 @@
     const m = mapState();
     return ((m.data && m.data.areas) || []).map((a) => {
       const r = areaRow(a.id);
-      return Object.assign({}, a, r ? { name: r.name || a.name, team_id: r.team_id, out: r.not_ours, group: r.group_id || null } : { team_id: null, out: a.team === 'out', group: a.group || null });
+      return Object.assign({}, a, r ? { name: r.name || a.name, team_id: r.team_id, out: r.not_ours, group: r.group_id || null, labelAt: r.label_x != null && r.label_y != null ? [r.label_x, r.label_y] : null } : { team_id: null, out: a.team === 'out', group: a.group || null });
     });
   }
   const gidOf = (a) => a.group || a.id;
+
+  // ---- Room names: placed at the roomiest point of each space, sized (and if
+  // need be wrapped onto two lines, or turned sideways in narrow spaces) so they
+  // fit inside it; a name that would still overlap a bigger room's name is left
+  // off (tap the room to see it). Admins can move a name (Move label).
+  const LABEL_FONT = '"Arial Narrow", "Roboto Condensed", -apple-system, sans-serif';
+  let measureCtx = null;
+  const textW = (str, size) => {
+    if (!measureCtx) { measureCtx = document.createElement('canvas').getContext('2d'); measureCtx.font = '600 100px ' + LABEL_FONT; }
+    return measureCtx.measureText(str).width * size / 100;
+  };
+  function inPoly(x, y, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, yi] = poly[i], [xj, yj] = poly[j];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+  function edgeDist(x, y, poly) {
+    let best = Infinity;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [ax, ay] = poly[j], [bx, by] = poly[i];
+      const dx = bx - ax, dy = by - ay, L = dx * dx + dy * dy;
+      const t = L ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L)) : 0;
+      best = Math.min(best, Math.hypot(x - (ax + t * dx), y - (ay + t * dy)));
+    }
+    return best;
+  }
+  const roomiestCache = new Map();
+  function roomiest(poly, key) {
+    if (roomiestCache.has(key)) return roomiestCache.get(key);
+    const xs = poly.map((p) => p[0]), ys = poly.map((p) => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    let best = { x: (x0 + x1) / 2, y: (y0 + y1) / 2, d: -1 };
+    const scan = (ax, bx, ay, by, step) => {
+      for (let x = ax; x <= bx; x += step) for (let y = ay; y <= by; y += step) {
+        if (!inPoly(x, y, poly)) continue;
+        const d = edgeDist(x, y, poly);
+        if (d > best.d) best = { x, y, d };
+      }
+    };
+    const step = Math.max(x1 - x0, y1 - y0) / 24 || 1;
+    scan(x0, x1, y0, y1, step);
+    scan(best.x - step, best.x + step, best.y - step, best.y + step, step / 5);
+    roomiestCache.set(key, best);
+    return best;
+  }
+  const boxInside = (poly, cx, cy, w, h) => [[-1, -1], [1, -1], [1, 1], [-1, 1], [0, -1], [0, 1], [-1, 0], [1, 0]]
+    .every(([kx, ky]) => inPoly(cx + kx * w / 2, cy + ky * h / 2, poly));
+  function splitTwo(name) {
+    const words = name.split(/\s+/);
+    if (words.length < 2) return null;
+    let best = null;
+    for (let i = 1; i < words.length; i++) {
+      const a = words.slice(0, i).join(' '), b = words.slice(i).join(' ');
+      const score = Math.abs(a.length - b.length);
+      if (!best || score < best.score) best = { lines: [a, b], score };
+    }
+    return best.lines;
+  }
+  const isGenericName0 = (n) => /^Room \d+$/.test(n || '');
+  function layoutLabels(areas) {
+    const out = [];
+    areas.filter((a) => !a.group && !a.out && a.name && !isGenericName0(a.name)).forEach((a) => {
+      const parts = areas.filter((x) => gidOf(x) === a.id);
+      const main = parts.reduce((x, y) => (y.a > x.a ? y : x), a);
+      const poly = main.poly;
+      const spot = a.labelAt ? { x: a.labelAt[0], y: a.labelAt[1] } : roomiest(poly, main.id);
+      const xs = poly.map((p) => p[0]), ys = poly.map((p) => p[1]);
+      const tall = (Math.max(...ys) - Math.min(...ys)) > 1.8 * (Math.max(...xs) - Math.min(...xs));
+      const options = [[a.name]];
+      const two = splitTwo(a.name); if (two) options.push(two);
+      let pick = null;
+      const maxSize = Math.max(3.6, Math.min(8.3, 3.4 + Math.sqrt(a.a) * 0.013));
+      for (let size = maxSize; size >= 2.6 && !pick; size *= 0.92) {
+        for (const lines of options) {
+          const w = Math.max(...lines.map((l) => textW(l, size))) * 1.06 + size * 0.3, h = lines.length * size * 1.12;
+          for (const rot of tall ? [false, true] : [false]) {
+            const bw = rot ? h : w, bh = rot ? w : h;
+            if (a.labelAt || boxInside(poly, spot.x, spot.y, bw, bh)) { pick = { size, lines, rot, bw, bh }; break; }
+          }
+          if (pick) break;
+        }
+      }
+      if (!pick) {   // doesn't fit even small: smallest size, two lines if that helps
+        const lines = two || [a.name], size = 2.6;
+        const w = Math.max(...lines.map((l) => textW(l, size))) * 1.06, h = lines.length * size * 1.12;
+        pick = { size, lines, rot: false, bw: w, bh: h, tight: true };
+      }
+      out.push(Object.assign({ id: a.id, x: spot.x, y: spot.y, big: main.a, moved: !!a.labelAt }, pick));
+    });
+    // Keep the names of bigger rooms (and names an admin placed); drop smaller ones that would overlap.
+    out.sort((p, q) => (q.moved - p.moved) || (q.big - p.big));
+    const placed = [];
+    for (const L of out) {
+      const box = [L.x - L.bw / 2, L.y - L.bh / 2, L.x + L.bw / 2, L.y + L.bh / 2];
+      L.hidden = placed.some((b) => box[0] < b[2] && box[2] > b[0] && box[1] < b[3] && box[3] > b[1]);
+      if (!L.hidden) placed.push(box);
+    }
+    return out;
+  }
+  function drawLabel(L, g) {
+    const t = sv('text', { class: 'm-room', x: L.x, y: L.y, 'font-size': L.size.toFixed(2), transform: L.rot ? `rotate(-90 ${L.x} ${L.y})` : null }, g);
+    if (L.lines.length === 1) { t.textContent = L.lines[0]; return; }
+    L.lines.forEach((line, i) => { const ts = sv('tspan', { x: L.x, dy: i === 0 ? (-0.56 * L.size).toFixed(2) : (1.12 * L.size).toFixed(2) }, t); ts.textContent = line; });
+  }
   const showZones = () => teamsEnabled() || isAdmin();   // Teams off: members don't see team zones
   const teamHex = (t) => (t && TEAM_HEX[t.color]) || TEAM_HEX.gray;
   // Zone colors (admins, Map tab → Zone colors): any color per team zone and for
@@ -5051,16 +5158,15 @@
     const gA = layer('altpaths'), gP = layer('paths');
     drawMapPaths(gP, gA, areas, o);
     const gR = layer('rooms');
-    const labelSize = (a) => Math.max(3.6, Math.min(8.3, 3.4 + Math.sqrt(a.a) * 0.013));
-    areas.filter((a) => !a.group && !a.out && a.name && !isGenericName(a.name)).forEach((a) => {
-      sv('text', { class: 'm-room', x: a.lx, y: a.ly, 'font-size': labelSize(a).toFixed(2) }, gR).textContent = a.name;
-    });
+    const labels = layoutLabels(areas);
+    labels.filter((L) => !L.hidden).forEach((L) => drawLabel(L, gR));
     if (zonesOn) teamsSorted().forEach((t) => {
       const rs = areas.filter((a) => !a.group && !a.out && a.team_id === t.id);
       if (!rs.length) return;
       const big = rs.reduce((x, y) => (y.a > x.a ? y : x));
-      const dy = isGenericName(big.name) ? 0 : labelSize(big) * 1.15;
-      sv('text', { class: 'm-zone', x: big.lx, y: big.ly + dy, fill: zoneHex(t) }, gZ).textContent = t.name.toUpperCase();
+      const L = labels.find((x) => x.id === big.id && !x.hidden && !x.rot);
+      const spot = L ? { x: L.x, y: L.y + L.bh / 2 + 4.5 } : roomiest(big.poly, big.id);
+      sv('text', { class: 'm-zone', x: spot.x, y: spot.y, fill: zoneHex(t) }, gZ).textContent = t.name.toUpperCase();
     });
     const gS = layer('streets');
     (D.streets || []).forEach((s) => { sv('text', { class: 'm-street', x: s.x, y: s.y }, gS).textContent = s.text; });
@@ -5181,6 +5287,12 @@
       render();
       return;
     }
+    if (m.mode === 'label') {
+      m.mode = null;
+      const p = toMapPoint(svg, e.clientX, e.clientY);
+      if (await saveAreas([m.sel], { label_x: +p.x.toFixed(1), label_y: +p.y.toFixed(1) })) toast('Label moved');
+      return;
+    }
     if (m.mode === 'merge') {
       m.mode = null;
       const areas = mapAreas();
@@ -5236,6 +5348,8 @@
         h('button', { class: 'chip' + (a.out ? ' on' : ''), onclick: () => saveAreas(ids, { team_id: null, not_ours: true }) }, 'Not our space')));
       body.push(h('div', { class: 'actions' },
         h('button', { class: 'btn small', onclick: () => startMapMode('merge') }, 'Merge with another area'),
+        h('button', { class: 'btn small', onclick: () => startMapMode('label') }, 'Move label'),
+        a.labelAt ? h('button', { class: 'btn small', onclick: () => saveAreas([a.id], { label_x: null, label_y: null }) }, 'Reset label') : null,
         members.length ? h('button', { class: 'btn small', onclick: () => saveAreas(members.map((x) => x.id), { group_id: null }) }, 'Separate merged areas') : null));
     }
     return h('div', { class: 'card' }, body);
@@ -5599,7 +5713,7 @@
       h('div', { class: 'map-hud' },
         h('div', { class: 'map-compass', 'aria-label': 'North is to the ' + (D.north || 'top') }, 'N →'),
         zoomBtn('+', 0.7), zoomBtn('−', 1 / 0.7)),
-      m.mode ? h('div', { class: 'map-banner' }, m.mode === 'add' ? 'Tap the map where it goes' : m.mode === 'move' ? 'Tap the new spot' : 'Tap the area to merge in',
+      m.mode ? h('div', { class: 'map-banner' }, m.mode === 'add' ? 'Tap the map where it goes' : m.mode === 'move' ? 'Tap the new spot' : m.mode === 'label' ? 'Tap where the name should go' : 'Tap the area to merge in',
         h('button', { type: 'button', onclick: () => { m.mode = null; render(); } }, 'Cancel')) : null);
     // Set the view once the map is on screen (it needs its size), then draw markers at the right size.
     requestAnimationFrame(() => {
